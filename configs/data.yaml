@@ -1,0 +1,36 @@
+# ---------------------------------------------------------------------------
+# Data configuration for the NASA C-MAPSS turbofan dataset.
+#
+# WHY A CONFIG FILE?
+# Hard-coded paths and magic numbers scattered through code are the single most
+# common reason an ML project cannot be re-run six months later. Everything that
+# describes *the data* lives here; the code only describes *the logic*. Moving
+# from FD001 to FD002 later should be a config change, not a code change.
+# ---------------------------------------------------------------------------
+
+dataset:
+  name: FD001
+
+  # Paths are relative to the repository root.
+  raw_dir: data/raw
+  interim_dir: data/interim
+
+  files:
+    train: train_FD001.txt
+    test: test_FD001.txt
+    rul_truth: RUL_FD001.txt
+
+  # Column layout of the raw files. The raw .txt files have NO header row --
+  # they are just numbers -- so these names come from the dataset documentation.
+  # Order matters: it must match the column order in the file exactly.
+  n_operational_settings: 3
+  n_sensors: 21
+
+  # Shape expectations, used by tests and by the ingestion script's sanity
+  # check. If a future file silently changes, we want a loud failure, not a
+  # quietly wrong model.
+  expected:
+    train_rows: 20631
+    test_rows: 13096
+    n_engines_train: 100
+    n_engines_test: 100

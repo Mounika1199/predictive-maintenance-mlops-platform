@@ -1,0 +1,37 @@
+# ---------------------------------------------------------------------------
+# Virtual environment
+# ---------------------------------------------------------------------------
+mlops_env/
+.venv/
+venv/
+
+# ---------------------------------------------------------------------------
+# Data
+#
+# Data NEVER goes into Git. Git is built for small text files that change line
+# by line; it stores a full copy of every version of every binary file, so a
+# repo with datasets in it becomes enormous and slow forever (you cannot easily
+# undo it). In a later task we put data under DVC, which versions data properly
+# while keeping only a tiny pointer file in Git.
+#
+# NOTE the leading slash: "/data/" matches ONLY the data directory at the
+# repository root. Without it, the pattern would match a directory named
+# "data" at ANY depth -- including our src/data/ Python package, which would
+# then be silently excluded from every commit.
+# ---------------------------------------------------------------------------
+/data/
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ---------------------------------------------------------------------------
+# Notebooks & editors
+# ---------------------------------------------------------------------------
+.ipynb_checkpoints/
+.vscode/
+.idea/

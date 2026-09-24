@@ -1,0 +1,6 @@
+[tool.pytest.ini_options]
+# Adds the repository root to Python's import path when running tests, so that
+# `from src.data.load_cmapss import ...` works without sys.path hacks or having
+# to pip-install the project. Keeps test files clean.
+pythonpath = ["."]
+testpaths = ["tests"]

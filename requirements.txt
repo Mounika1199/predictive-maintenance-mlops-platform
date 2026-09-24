@@ -1,0 +1,12 @@
+# Dependencies are added ONLY in the task that needs them, and each one is
+# justified. No scikit-learn / MLflow / DVC / FastAPI yet -- those arrive later.
+#
+# Versions are pinned (==) so that this environment can be rebuilt identically
+# on another machine, in Docker, or in CI. "It worked yesterday" is not a
+# reproducibility strategy.
+
+pandas==2.2.3        # dataframes: the table abstraction for all our tabular data
+numpy==1.26.4        # numeric arrays; pandas sits on top of it
+pyarrow==18.1.0      # lets pandas read/write Parquet (typed, compressed, fast)
+PyYAML==6.0.2        # reads configs/data.yaml so paths are not hard-coded
+pytest==8.3.4        # test runner; tests are how "reproducible" becomes real
