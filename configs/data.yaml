@@ -34,3 +34,24 @@ dataset:
     test_rows: 13096
     n_engines_train: 100
     n_engines_test: 100
+
+# ---------------------------------------------------------------------------
+# Data validation settings.
+# ---------------------------------------------------------------------------
+validation:
+  # Where the generated reference profile lives (relative to the repo root).
+  reference_profile: configs/reference_profile.json
+
+  # How far outside the TRAINING range a value may fall before we call it
+  # invalid, as a fraction of the training range (max - min).
+  #
+  # Why not 0.0? Training data is only a sample. Real data routinely exceeds
+  # the extremes that happened to appear in it -- our own held-out test set
+  # already does, in 7 of 17 varying columns. A zero-tolerance rule would
+  # reject perfectly valid data, and an alarm that cries wolf gets ignored,
+  # which is worse than no alarm at all.
+  range_tolerance: 0.10
+
+  # Columns that are constant in training must stay constant. This is an
+  # absolute tolerance, to absorb floating-point noise only.
+  constant_tolerance: 1.0e-6

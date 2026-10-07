@@ -1,0 +1,189 @@
+{
+  "dataset": "FD001",
+  "n_rows": 20631,
+  "n_engines": 100,
+  "columns": {
+    "unit_number": {
+      "dtype": "int64",
+      "min": 1,
+      "max": 100,
+      "n_unique": 100,
+      "constant": false
+    },
+    "time_in_cycles": {
+      "dtype": "int64",
+      "min": 1,
+      "max": 362,
+      "n_unique": 362,
+      "constant": false
+    },
+    "op_setting_1": {
+      "dtype": "float64",
+      "min": -0.0087,
+      "max": 0.0087,
+      "n_unique": 158,
+      "constant": false
+    },
+    "op_setting_2": {
+      "dtype": "float64",
+      "min": -0.0006,
+      "max": 0.0006,
+      "n_unique": 13,
+      "constant": false
+    },
+    "op_setting_3": {
+      "dtype": "float64",
+      "min": 100.0,
+      "max": 100.0,
+      "n_unique": 1,
+      "constant": true
+    },
+    "sensor_1": {
+      "dtype": "float64",
+      "min": 518.67,
+      "max": 518.67,
+      "n_unique": 1,
+      "constant": true
+    },
+    "sensor_2": {
+      "dtype": "float64",
+      "min": 641.21,
+      "max": 644.53,
+      "n_unique": 310,
+      "constant": false
+    },
+    "sensor_3": {
+      "dtype": "float64",
+      "min": 1571.04,
+      "max": 1616.91,
+      "n_unique": 3012,
+      "constant": false
+    },
+    "sensor_4": {
+      "dtype": "float64",
+      "min": 1382.25,
+      "max": 1441.49,
+      "n_unique": 4051,
+      "constant": false
+    },
+    "sensor_5": {
+      "dtype": "float64",
+      "min": 14.62,
+      "max": 14.62,
+      "n_unique": 1,
+      "constant": true
+    },
+    "sensor_6": {
+      "dtype": "float64",
+      "min": 21.6,
+      "max": 21.61,
+      "n_unique": 2,
+      "constant": false
+    },
+    "sensor_7": {
+      "dtype": "float64",
+      "min": 549.85,
+      "max": 556.06,
+      "n_unique": 513,
+      "constant": false
+    },
+    "sensor_8": {
+      "dtype": "float64",
+      "min": 2387.9,
+      "max": 2388.56,
+      "n_unique": 53,
+      "constant": false
+    },
+    "sensor_9": {
+      "dtype": "float64",
+      "min": 9021.73,
+      "max": 9244.59,
+      "n_unique": 6403,
+      "constant": false
+    },
+    "sensor_10": {
+      "dtype": "float64",
+      "min": 1.3,
+      "max": 1.3,
+      "n_unique": 1,
+      "constant": true
+    },
+    "sensor_11": {
+      "dtype": "float64",
+      "min": 46.85,
+      "max": 48.53,
+      "n_unique": 159,
+      "constant": false
+    },
+    "sensor_12": {
+      "dtype": "float64",
+      "min": 518.69,
+      "max": 523.38,
+      "n_unique": 427,
+      "constant": false
+    },
+    "sensor_13": {
+      "dtype": "float64",
+      "min": 2387.88,
+      "max": 2388.56,
+      "n_unique": 56,
+      "constant": false
+    },
+    "sensor_14": {
+      "dtype": "float64",
+      "min": 8099.94,
+      "max": 8293.72,
+      "n_unique": 6078,
+      "constant": false
+    },
+    "sensor_15": {
+      "dtype": "float64",
+      "min": 8.3249,
+      "max": 8.5848,
+      "n_unique": 1918,
+      "constant": false
+    },
+    "sensor_16": {
+      "dtype": "float64",
+      "min": 0.03,
+      "max": 0.03,
+      "n_unique": 1,
+      "constant": true
+    },
+    "sensor_17": {
+      "dtype": "float64",
+      "min": 388.0,
+      "max": 400.0,
+      "n_unique": 13,
+      "constant": false
+    },
+    "sensor_18": {
+      "dtype": "float64",
+      "min": 2388.0,
+      "max": 2388.0,
+      "n_unique": 1,
+      "constant": true
+    },
+    "sensor_19": {
+      "dtype": "float64",
+      "min": 100.0,
+      "max": 100.0,
+      "n_unique": 1,
+      "constant": true
+    },
+    "sensor_20": {
+      "dtype": "float64",
+      "min": 38.14,
+      "max": 39.43,
+      "n_unique": 120,
+      "constant": false
+    },
+    "sensor_21": {
+      "dtype": "float64",
+      "min": 22.8942,
+      "max": 23.6184,
+      "n_unique": 4745,
+      "constant": false
+    }
+  }
+}

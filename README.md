@@ -11,7 +11,7 @@ This repository is built incrementally, one stage at a time.
 | Stage | Status |
 |---|---|
 | Data ingestion | Done |
-| Data validation | Not started |
+| Data validation | Done |
 | Data versioning (DVC) | Not started |
 | Feature engineering | Not started |
 | Model training | Not started |
@@ -42,19 +42,28 @@ data/raw/RUL_FD001.txt
 ## Usage
 
 ```powershell
-python scripts/ingest_fd001.py   # raw .txt -> typed Parquet in data/interim/
-pytest                            # run the test suite
+python scripts/ingest_fd001.py              # raw .txt -> typed Parquet in data/interim/
+python scripts/build_reference_profile.py   # regenerate the validation contract (rarely)
+python scripts/validate_fd001.py            # check the data against that contract
+pytest                                       # run the test suite
 ```
+
+`validate_fd001.py` exits non-zero when validation fails, so it can become an
+automatic gate in a pipeline or in CI later.
 
 ## Project layout
 
 ```
-configs/data.yaml            Paths, column layout, expected shapes
-data/raw/                    Original .txt files            (git-ignored)
-data/interim/                Ingested Parquet tables        (git-ignored)
-src/data/load_cmapss.py      Pure loading functions (importable, testable)
-scripts/ingest_fd001.py      Entry point: reads config, loads, writes Parquet
-tests/                       Pytest suite
+configs/data.yaml                  Paths, column layout, expected shapes, tolerances
+configs/reference_profile.json     Generated contract: per-column dtype/min/max
+data/raw/                          Original .txt files             (git-ignored)
+data/interim/                      Ingested Parquet tables         (git-ignored)
+src/data/load_cmapss.py            Pure loading functions (importable, testable)
+src/data/validation.py             Schema building + structural checks
+scripts/ingest_fd001.py            Entry point: loads raw, writes Parquet
+scripts/build_reference_profile.py Entry point: writes the reference profile
+scripts/validate_fd001.py          Entry point: validates, exits non-zero on failure
+tests/                             Pytest suite
 ```
 
 The split between `src/` and `scripts/` is deliberate: `src/` holds **pure
@@ -96,6 +105,45 @@ Every line of the raw `.txt` files ends with **trailing spaces**. Reading them
 with `sep=" "` makes pandas invent two extra all-NaN columns (28 instead of 26).
 The loader uses `sep=r"\s+"`, and a test asserts the column count and the
 absence of missing values so this cannot silently regress.
+
+## Data validation
+
+Validation declares a contract the data must satisfy, and fails loudly when it
+does not. The failures that matter in ML are silent ones -- a recalibrated
+sensor, a reordered column, a burst of NaNs -- which produce a quietly worse
+model rather than a crash.
+
+Rules are **not** hardcoded. `build_reference_profile.py` measures the training
+data once into `configs/reference_profile.json` (per column: dtype, min, max,
+whether it is constant), and validation checks against that committed file. At
+serving time the training set is not in memory -- a stored contract is what you
+actually have. The same file will later be the baseline for drift detection.
+
+Two tolerances, solving unrelated problems:
+
+| | `constant_tolerance` | `range_tolerance` |
+|---|---|---|
+| Fixes | floating-point rounding noise | training data being a limited sample |
+| Value | `1e-6` | `0.10` (10%) |
+| Kind | absolute | relative, as a fraction of the column's span |
+
+The second one is not optional padding. **7 of 17 varying columns have test
+values outside the training range** -- a zero-tolerance rule would reject our own
+valid held-out data, and an alarm that cries wolf gets ignored.
+
+The profile also records that **7 of 26 columns are perfectly constant**
+(`op_setting_3`, `sensor_1`, `sensor_5`, `sensor_10`, `sensor_16`, `sensor_18`,
+`sensor_19`). They carry no predictive information, but they make excellent
+tripwires: if one ever moves, something upstream changed.
+
+### Import note
+
+`src/data/validation.py` imports `pandera.pandas`, not bare `pandera`. Pandera
+dispatches checks to per-library implementations, and importing the pandas
+namespace is what registers them. A bare `import pandera` left the registry
+empty and made every check fail with
+`KeyError("<class 'pandas.core.series.Series'>")` -- an error that looks like a
+data problem but is purely an import problem.
 
 ## Notes for later stages
 

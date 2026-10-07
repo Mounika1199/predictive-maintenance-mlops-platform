@@ -10,3 +10,9 @@ numpy==1.26.4        # numeric arrays; pandas sits on top of it
 pyarrow==18.1.0      # lets pandas read/write Parquet (typed, compressed, fast)
 PyYAML==6.0.2        # reads configs/data.yaml so paths are not hard-coded
 pytest==8.3.4        # test runner; tests are how "reproducible" becomes real
+
+# Data validation. Pandera lets us declare a DataFrame's contract (columns,
+# dtypes, ranges, nullability) as readable code instead of a pile of if/raise
+# checks, and reports exactly which rows violated which rule. Chosen over
+# Great Expectations, which is far heavier than this project needs.
+pandera==0.33.1

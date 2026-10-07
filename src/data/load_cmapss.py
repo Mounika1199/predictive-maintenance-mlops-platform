@@ -116,10 +116,21 @@ def load_raw_table(path: Path | str, columns: list[str]) -> pd.DataFrame:
 
     frame.columns = columns
 
-    # unit_number and time_in_cycles are counters, not measurements. Making them
-    # explicit integers avoids them showing up as 1.0, 2.0, ... in every output.
-    frame = frame.astype({"unit_number": "int64", "time_in_cycles": "int64"})
-    return frame
+    # Set dtypes by MEANING, not by whatever pandas happened to infer.
+    #
+    # unit_number and time_in_cycles are counters -> integers.
+    #
+    # Everything else is a continuous physical measurement -> float64. This
+    # matters more than it looks: sensor_17 and sensor_18 infer as int64 purely
+    # because the raw text prints them as "392" and "2388" with no decimal
+    # point. If a future export wrote "392.0" instead, the dtype would silently
+    # flip and any strict schema check would reject perfectly valid data. Dtype
+    # should describe what a column *is*, not how it was formatted.
+    dtypes = {column: "float64" for column in columns}
+    dtypes["unit_number"] = "int64"
+    dtypes["time_in_cycles"] = "int64"
+
+    return frame.astype(dtypes)
 
 
 def load_rul_truth(path: Path | str) -> pd.DataFrame:
