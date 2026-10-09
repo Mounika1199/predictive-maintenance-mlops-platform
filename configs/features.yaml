@@ -1,0 +1,59 @@
+# ---------------------------------------------------------------------------
+# Feature engineering and labelling configuration.
+#
+# Kept separate from data.yaml on purpose. data.yaml describes FACTS ABOUT THE
+# DATA (where it lives, what columns it has) and almost never changes. This file
+# holds MODELLING CHOICES, which we expect to tune repeatedly. Different
+# lifecycles, different files.
+# ---------------------------------------------------------------------------
+
+label:
+  # Cap the Remaining Useful Life target at this many cycles ("piecewise-linear
+  # RUL"). Everything above the cap becomes the cap.
+  #
+  # WHY CAP AT ALL? Our own profiling settled this. Standardised sensor readings
+  # are FLAT between 200 and 300+ cycles remaining -- an engine with 300 cycles
+  # left is indistinguishable from one with 200. Correlation with RUL collapses
+  # from 0.765 (late life) to 0.171 (early life).
+  #
+  # Without a cap, 38.9% of training rows (8,031) ask the model to tell apart
+  # cases that look identical. It cannot, so it absorbs the error as noise --
+  # and that noise degrades what it learns about the region that matters.
+  #
+  # WHY 125? It is where the degradation signal becomes measurable in this data,
+  # and it is the long-standing C-MAPSS convention. The cost is small and
+  # bounded: only 11 of 100 test engines exceed it, by at most 20 cycles.
+  cap: 125
+
+split:
+  # Fraction of ENGINES (never rows) held out for validation.
+  validation_fraction: 0.2
+
+  # Fixed seed so the same engines land in validation every run. Reproducibility
+  # is not optional: without it, two runs are not comparable and you cannot tell
+  # a real improvement from a lucky split.
+  seed: 42
+
+features:
+  # Trailing window, in cycles, for the rolling statistics.
+  #
+  # Rolling MEAN suppresses cycle-to-cycle sensor noise so the degradation trend
+  # shows through. Rolling STD captures instability, which tends to rise as a
+  # component approaches failure.
+  rolling_window: 5
+
+  # Give the model the engine's age ("cycle", a scaled copy of time_in_cycles)?
+  #
+  # time_in_cycles itself is always kept, untouched, as the row's TIMESTAMP.
+  # This switch only controls whether the model also sees age as an input.
+  #
+  # Age is a fair clue -- always known at prediction time, correlation -0.736
+  # with RUL -- but a rough one: at cycle 100, training engines have anywhere
+  # from 28 to 262 cycles left. A model could lean on age instead of reading
+  # the sensors, which fails on exactly the unusual engines we most need to
+  # catch. On for now; once we have a model, train with and without it.
+  include_cycle_feature: true
+
+output:
+  processed_dir: data/processed
+  stats_file: data/processed/feature_stats.json

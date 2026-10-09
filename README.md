@@ -13,7 +13,7 @@ This repository is built incrementally, one stage at a time.
 | Data ingestion | Done |
 | Data validation | Done |
 | Data versioning (DVC) | Not started |
-| Feature engineering | Not started |
+| RUL labelling & feature engineering | Done |
 | Model training | Not started |
 | Model evaluation | Not started |
 | Experiment tracking (MLflow) | Not started |
@@ -45,8 +45,14 @@ data/raw/RUL_FD001.txt
 python scripts/ingest_fd001.py              # raw .txt -> typed Parquet in data/interim/
 python scripts/build_reference_profile.py   # regenerate the validation contract (rarely)
 python scripts/validate_fd001.py            # check the data against that contract
+python scripts/build_features.py            # labels, split, features -> data/processed/
 pytest                                       # run the test suite
 ```
+
+`build_features.py` reads the files written by `ingest_fd001.py`, so run
+ingestion first. If the loading code changes, re-run ingestion too -- the files
+in `data/interim/` do not update themselves. (Tracking which outputs are out of
+date is one of the jobs DVC will take over in a later stage.)
 
 `validate_fd001.py` exits non-zero when validation fails, so it can become an
 automatic gate in a pipeline or in CI later.
@@ -55,14 +61,20 @@ automatic gate in a pipeline or in CI later.
 
 ```
 configs/data.yaml                  Paths, column layout, expected shapes, tolerances
+configs/features.yaml              Modelling choices: RUL cap, split, rolling window
 configs/reference_profile.json     Generated contract: per-column dtype/min/max
 data/raw/                          Original .txt files             (git-ignored)
 data/interim/                      Ingested Parquet tables         (git-ignored)
+data/processed/                    Model-ready features + stats    (git-ignored)
 src/data/load_cmapss.py            Pure loading functions (importable, testable)
 src/data/validation.py             Schema building + structural checks
+src/data/split.py                  Engine-level train/validation split
+src/features/labels.py             RUL target for train and test
+src/features/engineering.py        Sensor choice, rolling features, scaling
 scripts/ingest_fd001.py            Entry point: loads raw, writes Parquet
 scripts/build_reference_profile.py Entry point: writes the reference profile
 scripts/validate_fd001.py          Entry point: validates, exits non-zero on failure
+scripts/build_features.py          Entry point: interim -> processed features
 tests/                             Pytest suite
 ```
 
@@ -145,12 +157,91 @@ empty and made every check fail with
 `KeyError("<class 'pandas.core.series.Series'>")` -- an error that looks like a
 data problem but is purely an import problem.
 
+## RUL labels and features
+
+`build_features.py` turns validated data into a supervised learning problem, in
+this order: **labels → split → features → scaling**. The split comes before
+anything is learned from the data, so validation engines cannot influence any
+decision.
+
+### The target: Remaining Useful Life
+
+RUL = how many more cycles (roughly, flights) until the engine fails. Train and
+test need different arithmetic because they were recorded differently:
+
+* **Train** engines ran until they broke, so we count backwards from the last
+  row: `rul = last_cycle - time_in_cycles`.
+* **Test** engines were switched off early. `RUL_FD001.txt` gives their
+  remaining life at the last observed cycle, and we count back from that:
+  `rul = truth + (last_cycle - time_in_cycles)`.
+
+### Capping RUL at 125
+
+Average sensor readings at different amounts of life remaining (training data):
+
+| life left | sensor_4 | sensor_11 |
+|---|---|---|
+| 300 | 1402.48 | 47.24 |
+| 200 | 1401.64 | 47.34 |
+| 100 | 1406.73 | 47.46 |
+| 5 | 1427.52 | 48.10 |
+
+Between 300 and 200 cycles left, the sensors barely move -- `sensor_4` even
+drifts the wrong way. Between 100 and 5 they move up to 25x more. An engine with
+300 cycles left and one with 200 look the same, so asking a model to tell them
+apart is asking the impossible.
+
+So the training target is capped: anything above 125 becomes 125. The true value
+is kept in `rul_uncapped`. The cost is small: only 11 of 100 test engines truly
+exceed 125, by at most 20 cycles.
+
+**Capping is a training aid, not the truth.** Final scores should be computed
+against `rul_uncapped`.
+
+### Split
+
+80 engines for training, 20 for validation, chosen by shuffling **engine ids**
+with a fixed seed (42). Every row of an engine stays on the same side. A row-level
+split would put near-identical neighbouring cycles on both sides and produce a
+flattering, meaningless validation score.
+
+### Features (46)
+
+* **15 sensors** -- the 6 sensors that never change in training are dropped.
+  Operating settings are dropped too: FD001 has a single operating condition, so
+  they are noise.
+* **Rolling mean and rolling std** of each sensor over the last 5 cycles, per
+  engine. Smooths noise and captures growing instability.
+* **`cycle`** -- a scaled copy of the engine's age. Optional
+  (`include_cycle_feature`); `time_in_cycles` itself is never modified, because
+  later steps rely on it as a timestamp.
+
+Rolling windows look **backward only** and **restart for every engine**. A window
+that peeks ahead would use readings that do not exist yet at prediction time. A
+test changes a future reading to 99,999 and checks that no earlier feature moves.
+
+### Scaling
+
+Every feature is scaled with `(x - mean) / std`, using means and standard
+deviations computed from the **training split only** and saved to
+`data/processed/feature_stats.json`. Validation, test and (later) live data are
+all translated with the same numbers.
+
+`feature_stats.json` is git-ignored, unlike `configs/reference_profile.json`.
+The reference profile is a **contract** that rarely changes; scaling statistics
+are **fitted parameters** that change with every retrain and belong with the
+model.
+
 ## Notes for later stages
 
-* **Splitting must be done by engine (`unit_number`), never by row.** Rows from
-  one engine are consecutive snapshots of the same degradation process; putting
-  some in train and some in validation leaks the answer and produces
-  validation scores that will not survive contact with reality.
-* **Ingestion is intentionally lossless.** RUL labels and features are *not*
-  computed here, so there is always a known-good starting point to fall back to
-  when a later stage looks wrong.
+* **Ingestion is intentionally lossless.** RUL labels and features are computed
+  in a separate stage, so there is always a known-good starting point to fall
+  back to when a later stage looks wrong.
+* **Do not score uncut validation engines on their last cycle.** Validation
+  engines come from the training file, so they ran to failure and every
+  last-cycle answer is RUL 0. Cut each engine at a random cycle first
+  (imitating how the test set was made), then use `last_cycle_per_engine()`.
+* **Score against `rul_uncapped`**, not the capped `rul`.
+* **Test the `cycle` feature both ways.** Engine age is a fair but rough clue: at
+  cycle 100, training engines have anywhere from 28 to 262 cycles left. Train
+  with and without it and compare.
