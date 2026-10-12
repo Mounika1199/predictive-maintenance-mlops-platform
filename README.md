@@ -14,8 +14,8 @@ This repository is built incrementally, one stage at a time.
 | Data validation | Done |
 | Data versioning (DVC) | Not started |
 | RUL labelling & feature engineering | Done |
-| Model training | Not started |
-| Model evaluation | Not started |
+| Model training | Done (first models) |
+| Model evaluation | Done (first version) |
 | Experiment tracking (MLflow) | Not started |
 | Model registry | Not started |
 | Model serving | Not started |
@@ -46,6 +46,8 @@ python scripts/ingest_fd001.py              # raw .txt -> typed Parquet in data/
 python scripts/build_reference_profile.py   # regenerate the validation contract (rarely)
 python scripts/validate_fd001.py            # check the data against that contract
 python scripts/build_features.py            # labels, split, features -> data/processed/
+python scripts/train.py                     # train, compare on validation, save the winner
+python scripts/evaluate.py                  # score the saved winner on the test set
 pytest                                       # run the test suite
 ```
 
@@ -62,20 +64,26 @@ automatic gate in a pipeline or in CI later.
 ```
 configs/data.yaml                  Paths, column layout, expected shapes, tolerances
 configs/features.yaml              Modelling choices: RUL cap, split, rolling window
+configs/training.yaml              Which models to train, and their settings
 configs/reference_profile.json     Generated contract: per-column dtype/min/max
 data/raw/                          Original .txt files             (git-ignored)
 data/interim/                      Ingested Parquet tables         (git-ignored)
 data/processed/                    Model-ready features + stats    (git-ignored)
+models/                            Trained models + score records  (git-ignored)
 src/data/load_cmapss.py            Pure loading functions (importable, testable)
 src/data/validation.py             Schema building + structural checks
 src/data/split.py                  Engine-level train/validation split
 src/features/labels.py             RUL target for train and test
 src/features/engineering.py        Sensor choice, rolling features, scaling
+src/models/metrics.py              RMSE, MAE, NASA score
+src/models/training.py             Building models, predicting (clipped at 0)
 scripts/ingest_fd001.py            Entry point: loads raw, writes Parquet
 scripts/build_reference_profile.py Entry point: writes the reference profile
 scripts/validate_fd001.py          Entry point: validates, exits non-zero on failure
 scripts/build_features.py          Entry point: interim -> processed features
-tests/                             Pytest suite
+scripts/train.py                   Entry point: train, select on validation, save
+scripts/evaluate.py                Entry point: score the saved model on test
+tests/                             Pytest suite (shared setup in conftest.py)
 ```
 
 The split between `src/` and `scripts/` is deliberate: `src/` holds **pure
@@ -232,16 +240,87 @@ The reference profile is a **contract** that rarely changes; scaling statistics
 are **fitted parameters** that change with every retrain and belong with the
 model.
 
+## Models and evaluation
+
+`train.py` trains three models on the 80 training engines, scores them on the 20
+validation engines, picks the lowest validation RMSE, and saves every model plus
+a record of the run (`models/selected.json`). It **never reads the test set**.
+`evaluate.py` then loads the saved winner -- training nothing -- and scores it on
+the test set.
+
+### Results
+
+| Model | Validation RMSE | Validation avg miss | Test RMSE | Test avg miss | Test NASA score |
+|---|---|---|---|---|---|
+| Always guess the average (87.5) | 42.0 | 36.8 | 43.2 | 35.9 | 35,723 |
+| Linear regression | 19.1 | 15.4 | -- | -- | -- |
+| **Random forest (selected)** | **15.1** | **9.8** | **18.8** | **13.7** | **694** |
+
+Only the selected model is scored on test (the baseline appears as a fixed
+reference point, not a candidate).
+
+### How each set is scored
+
+| | Purpose | Rows | Answer key |
+|---|---|---|---|
+| Validation | choose between models | every row of the 20 held-back engines | capped `rul` |
+| Test | the honest, real-world number | last observed cycle of each test engine | true `rul_uncapped` |
+
+Validation uses the capped key because it only *compares* candidates, all graded
+the same way; an uncapped key would let the unknowable far-future rows drown out
+real differences. The number reported as real-world accuracy comes from test,
+against the truth. (Against the capped key, test RMSE would have looked better:
+17.7.)
+
+**The test-set rule:** once the test score has been seen, the model is not
+changed because of it. Improvements are made on validation; test is revisited
+rarely, at the end of a round.
+
+### Metrics
+
+All start from **error = predicted - true**. Positive = *late* (more life
+predicted than there really was) -- the dangerous direction.
+
+* **MAE** -- the average size of a miss, in cycles.
+* **RMSE** -- like MAE, but large misses count extra. The standard headline
+  metric for C-MAPSS.
+* **NASA score** -- from the original C-MAPSS challenge. Penalises each miss
+  exponentially, late misses harder than early ones (late by 40 costs 53.6, early
+  by 40 costs 20.7). Summed over engines, so only comparable on the same engines.
+
+### What we learned
+
+* **Bending matters.** Wear is slow for most of an engine's life, then speeds up.
+  Linear regression (a straight line) was too optimistic in the last 50 cycles by
+  +16.7 cycles on average; the random forest by +6.4.
+* **The forest partly memorises.** Average miss 4.4 on its own training engines,
+  9.8 on unseen ones. The held-back engines are what reveal the honest number.
+* **One sensor dominates.** Smoothed `sensor_4` drives about half of the
+  forest's decisions; smoothed readings beat raw ones throughout.
+* **Test is harder than validation, as expected.** Validation includes many easy
+  early-life rows; test asks once per engine, mostly mid-life. The 11 test
+  engines with more than 125 cycles left are missed by 26.5 on average, all in
+  the safe (early) direction -- the cost of the cap.
+* **Averages hide the dangerous misses.** Test engine 37 truly had 21 cycles left;
+  the model said 70. That one engine is 19% of the whole NASA score. A real
+  system would add a safety margin or report how confident the model is.
+
 ## Notes for later stages
 
 * **Ingestion is intentionally lossless.** RUL labels and features are computed
   in a separate stage, so there is always a known-good starting point to fall
   back to when a later stage looks wrong.
-* **Do not score uncut validation engines on their last cycle.** Validation
-  engines come from the training file, so they ran to failure and every
-  last-cycle answer is RUL 0. Cut each engine at a random cycle first
-  (imitating how the test set was made), then use `last_cycle_per_engine()`.
-* **Score against `rul_uncapped`**, not the capped `rul`.
+* **Scoring every validation row already covers every possible cut.** Because
+  features look backward only, cutting an engine at cycle *t* and rebuilding its
+  features gives exactly the same values as row *t* of the full engine (verified:
+  difference 0.0). No separate random-cutting step is needed. Never score uncut
+  validation engines on their *last* cycle only, though: they ran to failure, so
+  every such answer is RUL 0.
 * **Test the `cycle` feature both ways.** Engine age is a fair but rough clue: at
-  cycle 100, training engines have anywhere from 28 to 262 cycles left. Train
-  with and without it and compare.
+  cycle 100, training engines have anywhere from 28 to 262 cycles left. Linear
+  regression made it its single biggest clue; the forest ranks it third. Train
+  with and without it and compare -- on validation.
+* **The forest is still slightly optimistic near failure** (+6.4 cycles on
+  validation, +5.4 on test). The direction to improve.
+* **`models/selected.json` is written by hand.** Recording every run's settings
+  and scores, and comparing runs, is what experiment tracking (MLflow) automates.

@@ -1,0 +1,31 @@
+# ---------------------------------------------------------------------------
+# Which models to train, and their settings.
+#
+# Same idea as features.yaml: choices we may want to change live here, not
+# buried inside code.
+# ---------------------------------------------------------------------------
+
+# Fixes the random choices the random forest makes while learning, so training
+# twice on the same data gives exactly the same model.
+random_state: 42
+
+models:
+  # Always predicts the training average. Not a real candidate -- it is the bar
+  # every real model must clearly beat.
+  baseline: {}
+
+  # A weighted sum of the features. No settings needed.
+  linear: {}
+
+  random_forest:
+    n_estimators: 200      # how many flowcharts (trees) to average
+    min_samples_leaf: 5    # each final answer must rest on >= 5 training rows,
+                           # which stops a tree memorising one odd row
+    n_jobs: -1             # use every processor core (speed only)
+
+# The winner is the model with the lowest RMSE on the VALIDATION engines.
+# The test set is never used to choose -- see scripts/evaluate.py.
+selection_metric: rmse
+
+output:
+  model_dir: models

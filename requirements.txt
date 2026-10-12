@@ -1,5 +1,5 @@
 # Dependencies are added ONLY in the task that needs them, and each one is
-# justified. No scikit-learn / MLflow / DVC / FastAPI yet -- those arrive later.
+# justified. No MLflow / DVC / FastAPI yet -- those arrive later.
 #
 # Versions are pinned (==) so that this environment can be rebuilt identically
 # on another machine, in Docker, or in CI. "It worked yesterday" is not a
@@ -16,3 +16,10 @@ pytest==8.3.4        # test runner; tests are how "reproducible" becomes real
 # checks, and reports exactly which rows violated which rule. Chosen over
 # Great Expectations, which is far heavier than this project needs.
 pandera==0.33.1
+
+# Machine learning. scikit-learn provides the models (linear regression, random
+# forest, and a "predict the average" baseline) behind one shared fit/predict
+# interface, so swapping models is a one-line change. It also brings joblib,
+# which we use to save trained models to disk. Arrives now because this is the
+# first task that trains a model.
+scikit-learn==1.9.1
