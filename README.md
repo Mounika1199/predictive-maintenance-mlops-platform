@@ -52,6 +52,7 @@ python scripts/build_features.py            # labels, split, features -> data/pr
 docker compose up -d                        # MLflow server must be running for train.py
 python scripts/train.py                     # train, compare on validation, record in MLflow
 python scripts/evaluate.py                  # score the saved winner on the test set
+python scripts/experiment_cycle_feature.py  # 5-fold experiment: does `cycle` help?
 pytest                                       # run the test suite (no Docker needed)
 ```
 
@@ -89,6 +90,7 @@ scripts/validate_fd001.py          Entry point: validates, exits non-zero on fai
 scripts/build_features.py          Entry point: interim -> processed features
 scripts/train.py                   Entry point: train, select on validation, save
 scripts/evaluate.py                Entry point: score the saved model on test
+scripts/experiment_cycle_feature.py Experiment: cycle feature, 5-fold CV by engine
 tests/                             Pytest suite (shared setup in conftest.py)
 ```
 
@@ -370,6 +372,42 @@ MLflow prints messages containing emoji, which the default Windows terminal
 character set cannot show; Python crashed mid-run and left a run stuck as
 RUNNING. `train.py` switches its own output to UTF-8 to prevent this.
 
+## Experiment: does engine age (`cycle`) help?
+
+**Question.** `cycle` -- the engine's age -- was linear regression's biggest clue
+and the forest's third. Is it genuinely useful, or does it make the models lean
+on age instead of reading the sensors? Only that one setting was changed; models,
+settings and engines stayed the same. Decided on validation; the test set stayed
+closed.
+
+**Step 1: one split** (our usual 20 validation engines). Removing `cycle` made
+the random forest worse by **3.00** RMSE and linear regression by **1.78**.
+
+**Step 2: five splits** (`scripts/experiment_cycle_feature.py`). 5-fold
+cross-validation by engine (`engine_folds()` in `src/data/split.py`): every
+engine is a validation engine exactly once. Recorded in MLflow as the parent run
+`cycle-feature-experiment` with 20 child runs.
+
+| Validation RMSE cost of removing `cycle` | Fold 1 | Fold 2 | Fold 3 | Fold 4 | Fold 5 | Average | Folds where it helps |
+|---|---|---|---|---|---|---|---|
+| Random forest | +3.00 | +2.52 | -1.53 | +1.81 | +2.10 | **+1.58** | 4 of 5 |
+| Linear regression | +1.78 | +1.76 | -4.02 | +2.35 | +1.42 | **+0.66** | 4 of 5 |
+
+**Decision: keep `cycle`.** It helps on most groups of engines, especially for
+the forest. No change was needed -- it was already the default.
+
+**What we learned**
+
+* **One split exaggerated the effect about 2x.** Fold 1 is our usual split, and it
+  turned out to be the *most* favourable of the five for `cycle` (+3.00 against an
+  average of +1.58). The direction was right; the size was not. On fold 3 alone we
+  would have concluded the opposite.
+* **Age misleads on unusual engines.** Fold 3 holds 7 engines that lived over 250
+  cycles (other folds: 1-4), including the longest-lived of all (362), and its
+  engines are on average 48 cycles away from the typical lifespan of 199 (other
+  folds: 23-36). On that fold both models did better *without* age. Age is a rule
+  of thumb about the typical engine.
+
 ## Notes for later stages
 
 * **Ingestion is intentionally lossless.** RUL labels and features are computed
@@ -381,10 +419,13 @@ RUNNING. `train.py` switches its own output to UTF-8 to prevent this.
   difference 0.0). No separate random-cutting step is needed. Never score uncut
   validation engines on their *last* cycle only, though: they ran to failure, so
   every such answer is RUL 0.
-* **Test the `cycle` feature both ways.** Engine age is a fair but rough clue: at
-  cycle 100, training engines have anywhere from 28 to 262 cycles left. Linear
-  regression made it its single biggest clue; the forest ranks it third. Train
-  with and without it and compare -- on validation.
+* **Watch engine lifespans in monitoring.** The `cycle` feature helps on typical
+  engines but hurt on a group of unusually long-lived ones (see the experiment
+  above). If engines in service start living longer than the training engines
+  did, this feature becomes a liability -- a concrete drift signal to monitor.
+* **Compare options on several folds, not one split.** A single split got the
+  direction of the `cycle` effect right but its size wrong by about 2x.
+  `engine_folds()` exists for this.
 * **The forest is still slightly optimistic near failure** (+6.4 cycles on
   validation, +5.4 on test). The direction to improve.
 * **Two records of the selected model.** MLflow now holds every run, but
