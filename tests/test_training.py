@@ -127,17 +127,19 @@ def test_real_models_clearly_beat_the_baseline(real) -> None:
     assert forest < 0.7 * baseline
 
 
-def test_training_script_never_reads_the_test_set() -> None:
+@pytest.mark.parametrize("script", ["train.py", "experiment_cycle_feature.py"])
+def test_decision_making_scripts_never_read_the_test_set(script: str) -> None:
     """A guard on the RULE, not just the code.
 
-    Choosing a model must happen on validation only. This is a simple text
-    check -- it looks for the test file's name or the split name "test" in
-    train.py -- so it is a tripwire, not a proof. But it will catch the most
-    likely way the rule gets broken: someone adding a test-set read "just to
-    have a look".
+    Choosing a model -- or choosing a setting, as the experiment does -- must
+    happen on validation only. This is a simple text check for the test files'
+    names or the split name "test", so it is a tripwire, not a proof. But it
+    will catch the most likely way the rule gets broken: someone adding a
+    test-set read "just to have a look".
     """
-    source = (PROJECT_ROOT / "scripts" / "train.py").read_text(encoding="utf-8")
+    source = (PROJECT_ROOT / "scripts" / script).read_text(encoding="utf-8")
 
-    assert "test_features" not in source
+    assert "test_features" not in source  # processed test file
+    assert "test_{" not in source  # interim test file, e.g. f"test_{name}.parquet"
     assert '"test"' not in source
     assert "'test'" not in source

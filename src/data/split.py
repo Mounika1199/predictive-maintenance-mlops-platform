@@ -70,8 +70,49 @@ def split_by_engine(
     validation_engines = sorted(int(e) for e in shuffled[:n_validation])
     train_engines = sorted(int(e) for e in shuffled[n_validation:])
 
-    in_validation = frame["unit_number"].isin(validation_engines)
+    return _make_split(frame, train_engines, validation_engines)
 
+
+def engine_folds(frame: pd.DataFrame, n_folds: int, seed: int) -> list[EngineSplit]:
+    """Cut the engines into ``n_folds`` groups; each group is validation once.
+
+    This is k-fold cross-validation, done BY ENGINE. With 100 engines and 5
+    folds:
+
+        fold 1: validate on group A (20 engines), train on B, C, D, E
+        fold 2: validate on group B,              train on A, C, D, E
+        ...
+        fold 5: validate on group E,              train on A, B, C, D
+
+    Every engine is a validation engine exactly once, and never appears on both
+    sides of the same fold.
+
+    WHY BOTHER? One validation set of 20 engines is one draw of luck. If option
+    X beats option Y on all five folds, the difference is real. If it wins three
+    and loses two, it is probably noise.
+    """
+    engines = np.sort(frame["unit_number"].unique())
+    if not 2 <= n_folds <= len(engines):
+        raise ValueError(f"n_folds must be between 2 and {len(engines)}, got {n_folds}")
+
+    shuffled = np.random.default_rng(seed).permutation(engines)
+
+    folds = []
+    for group in np.array_split(shuffled, n_folds):
+        validation_engines = sorted(int(e) for e in group)
+        held_out = set(validation_engines)
+        train_engines = [int(e) for e in engines if e not in held_out]
+        folds.append(_make_split(frame, train_engines, validation_engines))
+    return folds
+
+
+def _make_split(
+    frame: pd.DataFrame,
+    train_engines: list[int],
+    validation_engines: list[int],
+) -> EngineSplit:
+    """Put every row on the side its engine belongs to."""
+    in_validation = frame["unit_number"].isin(validation_engines)
     return EngineSplit(
         train=frame[~in_validation].reset_index(drop=True),
         validation=frame[in_validation].reset_index(drop=True),

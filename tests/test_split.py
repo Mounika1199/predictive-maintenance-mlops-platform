@@ -9,7 +9,7 @@ from __future__ import annotations
 import pandas as pd
 import pytest
 
-from src.data.split import split_by_engine
+from src.data.split import engine_folds, split_by_engine
 
 
 def engines(n_engines: int = 100, cycles: int = 3) -> pd.DataFrame:
@@ -80,3 +80,40 @@ def test_fraction_too_small_to_pick_any_engine_is_rejected() -> None:
     """1% of 10 engines rounds to 0 -- an empty validation set is useless."""
     with pytest.raises(ValueError, match="empty"):
         split_by_engine(engines(n_engines=10), validation_fraction=0.01, seed=42)
+
+
+# ---------------------------------------------------------------------------
+# k-fold cross-validation by engine
+# ---------------------------------------------------------------------------
+
+
+def test_every_engine_is_validation_exactly_once() -> None:
+    folds = engine_folds(engines(), n_folds=5, seed=42)
+
+    validated = [e for fold in folds for e in fold.validation_engines]
+    assert len(folds) == 5
+    assert sorted(validated) == list(range(1, 101))  # all 100, none twice
+
+
+def test_no_engine_is_on_both_sides_of_any_fold() -> None:
+    for fold in engine_folds(engines(), n_folds=5, seed=42):
+        assert set(fold.train_engines).isdisjoint(fold.validation_engines)
+        assert set(fold.train["unit_number"]).isdisjoint(fold.validation["unit_number"])
+        assert len(fold.train_engines) + len(fold.validation_engines) == 100
+
+
+def test_folds_are_equal_sized() -> None:
+    sizes = [len(f.validation_engines) for f in engine_folds(engines(), n_folds=5, seed=42)]
+    assert sizes == [20, 20, 20, 20, 20]
+
+
+def test_same_seed_gives_the_same_folds() -> None:
+    a = engine_folds(engines(), n_folds=5, seed=42)
+    b = engine_folds(engines(), n_folds=5, seed=42)
+    assert [f.validation_engines for f in a] == [f.validation_engines for f in b]
+
+
+@pytest.mark.parametrize("n_folds", [0, 1, 101])
+def test_impossible_fold_counts_are_rejected(n_folds: int) -> None:
+    with pytest.raises(ValueError):
+        engine_folds(engines(), n_folds=n_folds, seed=42)
