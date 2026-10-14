@@ -215,3 +215,69 @@ def test_client_and_server_versions_match() -> None:
     server = re.search(r"ghcr\.io/mlflow/mlflow:v([\d.]+)", compose).group(1)
 
     assert client == server
+
+
+# ---------------------------------------------------------------------------
+# The model registry: new versions are challengers, never champions
+# ---------------------------------------------------------------------------
+
+
+def test_registering_a_challenger_never_moves_the_champion(temporary_mlflow) -> None:
+    """Training a model and putting it into use are separate decisions."""
+    client = MlflowClient()
+    X = pd.DataFrame({"a": [1.0, 2.0, 3.0]})
+
+    def log_a_model() -> str:
+        with mlflow.start_run():
+            model = build_model("baseline").fit(X, [1.0, 2.0, 3.0])
+            return mlflow.sklearn.log_model(model, name="model").model_uri
+
+    first = tracking.register_challenger(client, log_a_model(), "demo-model", "first")
+    client.set_registered_model_alias("demo-model", tracking.CHAMPION, first.version)
+
+    second = tracking.register_challenger(client, log_a_model(), "demo-model", "second")
+
+    aliases = {name: str(v) for name, v in client.get_registered_model("demo-model").aliases.items()}
+    assert aliases[tracking.CHAMPION] == str(first.version)  # untouched
+    assert aliases[tracking.CHALLENGER] == str(second.version)  # moved to the newest
+    assert client.get_model_version("demo-model", second.version).description == "second"
+
+
+# ---------------------------------------------------------------------------
+# Detecting uncommitted code
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def tiny_repo(tmp_path):
+    """A one-file Git repository with a single commit."""
+    import git
+
+    repo = git.Repo.init(tmp_path)
+    repo.git.config("user.name", "Test")
+    repo.git.config("user.email", "test@example.com")
+    # write_bytes keeps Windows from changing the line endings, which Git
+    # would otherwise report as a modification.
+    (tmp_path / "code.py").write_bytes(b"x = 1\n")
+    repo.git.add("code.py")
+    repo.git.commit("-m", "first")
+    return tmp_path
+
+
+def test_committed_code_is_clean(tiny_repo) -> None:
+    assert tracking.has_uncommitted_changes(tiny_repo) is False
+
+
+def test_an_edited_file_counts_as_uncommitted(tiny_repo) -> None:
+    (tiny_repo / "code.py").write_bytes(b"x = 2\n")
+    assert tracking.has_uncommitted_changes(tiny_repo) is True
+
+
+def test_a_new_file_counts_as_uncommitted(tiny_repo) -> None:
+    """A brand-new script is code too, even before Git knows about it."""
+    (tiny_repo / "new_script.py").write_bytes(b"print('hi')\n")
+    assert tracking.has_uncommitted_changes(tiny_repo) is True
+
+
+def test_a_folder_outside_git_is_unknown(tmp_path) -> None:
+    assert tracking.has_uncommitted_changes(tmp_path) is None

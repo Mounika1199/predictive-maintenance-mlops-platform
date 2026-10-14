@@ -27,8 +27,14 @@ models:
 # The test set is never used to choose -- see scripts/evaluate.py.
 selection_metric: rmse
 
-output:
-  model_dir: models
+# Rules for scripts/promote_model.py, which moves the "champion" tag.
+promotion:
+  # A challenger must beat the champion's validation RMSE by at least this many
+  # cycles. Anything smaller counts as a tie, and a tie is no reason to switch.
+  # Without a margin, rounding dust could decide: the forest's predictions
+  # wobble at the 14th decimal place, so a retrained copy of the champion could
+  # "win" by 0.00000000000001.
+  min_improvement_rmse: 0.1
 
 # Where every training run is recorded. The MLflow server runs in Docker
 # (see compose.yaml -- start it with `docker compose up -d`).
@@ -39,3 +45,10 @@ output:
 mlflow:
   tracking_uri: http://localhost:5000
   experiment_name: rul-fd001
+
+  # The model's name in the MLflow MODEL REGISTRY -- the catalogue of numbered
+  # versions. train.py adds each session's winner as a new version tagged
+  # "challenger"; only scripts/promote_model.py moves the "champion" tag, which
+  # marks the version in use. Anything that needs the model asks for
+  # models:/rul-fd001@champion.
+  registered_model_name: rul-fd001

@@ -3,7 +3,8 @@
     python scripts/train.py
 
 Run AFTER scripts/build_features.py, with the MLflow server running
-(`docker compose up -d`). Reads data/processed/, writes models/ and MLflow.
+(`docker compose up -d`). Reads data/processed/; everything it produces goes to
+MLflow -- nothing is saved locally.
 
 WHAT IT DOES
 1. Check the MLflow server is reachable -- BEFORE spending time training.
@@ -11,8 +12,9 @@ WHAT IT DOES
    Each model becomes one MLflow RUN, holding its settings (parameters), its
    validation scores (metrics) and the trained model itself (an artifact).
 3. Pick the winner: the lowest validation RMSE. Tag its run selected=true.
-4. Save every trained model locally too, plus models/selected.json, which
-   scripts/evaluate.py reads.
+4. Register the winner in the model registry as a new version, tagged
+   'challenger'. Putting it into use ('champion') is a separate, deliberate
+   step: scripts/promote_model.py.
 
 THIS SCRIPT NEVER READS THE TEST SET. Choosing a model is a decision, and
 decisions are made on validation data only. The test set is opened once,
@@ -23,13 +25,10 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime, timezone
 from pathlib import Path
 
-import joblib
 import mlflow
 import pandas as pd
-import sklearn
 from mlflow import MlflowClient
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
@@ -38,8 +37,11 @@ sys.path.insert(0, str(PROJECT_ROOT))
 from src.data.load_cmapss import load_config  # noqa: E402
 from src.models.metrics import score  # noqa: E402
 from src.models.tracking import (  # noqa: E402
+    CHAMPION,
     check_server,
+    has_uncommitted_changes,
     log_trained_model,
+    register_challenger,
     resolve_tracking_uri,
     run_params,
 )
@@ -94,13 +96,19 @@ def main() -> int:
     experiment = mlflow.set_experiment(experiment_name)
 
     # 2. Train each model on TRAIN, score it on VALIDATION -- one MLflow run each.
-    fitted = {}
+    # Can these runs be reproduced from their recorded commit alone?
+    uncommitted = has_uncommitted_changes(PROJECT_ROOT)
+    if uncommitted:
+        print("Note: the code has uncommitted changes -- recorded on every run.\n")
+
     results = {}
     run_ids = {}
+    model_uris = {}
     for name, params in model_settings.items():
         with mlflow.start_run(run_name=name) as run:
             mlflow.log_params(run_params(name, params, random_state, feature_stats))
             mlflow.set_tag("selected", "false")  # the winner is re-tagged below
+            mlflow.set_tag("git.uncommitted_changes", str(uncommitted))
 
             model = build_model(name, params, random_state)
             model.fit(train[features], train[TARGET])
@@ -110,11 +118,11 @@ def main() -> int:
             mlflow.log_metrics({"val_rmse": scores["rmse"], "val_mae": scores["mae"]})
 
             # The model itself, its expected inputs, and its scaling numbers.
-            log_trained_model(model, val[features], predictions, stats_path)
+            info = log_trained_model(model, val[features], predictions, stats_path)
 
-        fitted[name] = model
         results[name] = {"rmse": scores["rmse"], "mae": scores["mae"]}
         run_ids[name] = run.info.run_id
+        model_uris[name] = info.model_uri
 
     print(f"\nValidation scores ({val['unit_number'].nunique()} engines never seen in training)\n")
     print(f"  {'model':<16}{'RMSE':>8}{'average miss':>15}")
@@ -133,41 +141,31 @@ def main() -> int:
         print(f"\nERROR: best model '{best}' does not beat the baseline. Nothing saved.")
         return 1
 
-    MlflowClient(tracking_uri).set_tag(run_ids[best], "selected", "true")
+    client = MlflowClient(tracking_uri)
+    client.set_tag(run_ids[best], "selected", "true")
     print(f"\nSelected: {best}  (lowest validation {metric.upper()})")
 
-    # 4. Save every model locally, and a record of what happened.
-    model_dir = PROJECT_ROOT / training_config["output"]["model_dir"]
-    model_dir.mkdir(parents=True, exist_ok=True)
-
-    print("\nWrote:")
-    for name, model in fitted.items():
-        path = model_dir / f"{name}.joblib"
-        joblib.dump(model, path)
-        print(f"  {path.relative_to(PROJECT_ROOT)}  ({path.stat().st_size / 1024 / 1024:,.1f} MB)")
-
-    record = {
-        "selected_model": best,
-        "params": model_settings[best],
-        "selection_metric": metric,
-        "target": TARGET,
-        "feature_columns": features,
-        "validation": results,
-        "training_data": {"rows": len(train), "engines": int(train["unit_number"].nunique())},
-        "validation_data": {"rows": len(val), "engines": int(val["unit_number"].nunique())},
-        "scikit_learn_version": sklearn.__version__,
-        "trained_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
-        "mlflow": {
-            "tracking_uri": tracking_uri,
-            "experiment": experiment_name,
-            "run_ids": run_ids,
-        },
-    }
-    record_path = model_dir / "selected.json"
-    with record_path.open("w", encoding="utf-8") as handle:
-        json.dump(record, handle, indent=2)
-        handle.write("\n")
-    print(f"  {record_path.relative_to(PROJECT_ROOT)}")
+    # Add the winner to the model registry as a new version, tagged
+    # "challenger". This does NOT put it into use: the "champion" tag stays
+    # where it is until someone runs scripts/promote_model.py on purpose.
+    registered_name = training_config["mlflow"]["registered_model_name"]
+    commit = client.get_run(run_ids[best]).data.tags.get("mlflow.source.git.commit", "unknown")[:7]
+    if uncommitted:
+        commit += " PLUS UNCOMMITTED CHANGES (not reproducible from the commit alone)"
+    version = register_challenger(
+        client,
+        model_uris[best],
+        registered_name,
+        description=(f"{best} trained by scripts/train.py at commit {commit}; "
+                     f"validation RMSE {results[best]['rmse']:.2f}."),
+    )
+    print(f"\nRegistered: {registered_name} version {version.version}, tagged 'challenger'")
+    try:
+        champion = client.get_model_version_by_alias(registered_name, CHAMPION)
+        print(f"            The champion (in use) is still version {champion.version}.")
+    except mlflow.exceptions.MlflowException:
+        print("            There is no champion yet.")
+    print("            To put the challenger into use: python scripts/promote_model.py")
 
     print(f"\nCompare the runs at: {tracking_uri}/#/experiments/{experiment.experiment_id}")
     return 0

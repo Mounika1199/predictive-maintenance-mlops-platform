@@ -8,9 +8,6 @@ had its own copy, they would slowly drift apart.
 
 from __future__ import annotations
 
-import json
-from pathlib import Path
-
 import numpy as np
 from sklearn.dummy import DummyRegressor
 from sklearn.ensemble import RandomForestRegressor
@@ -50,13 +47,3 @@ def predict_rul(model, features) -> np.ndarray:
     and not in whichever script happens to call it.
     """
     return np.clip(model.predict(features), 0, None)
-
-
-def load_feature_columns(stats_path: Path | str) -> list[str]:
-    """The exact, ordered list of feature columns, from feature_stats.json.
-
-    Read from the file written by build_features.py rather than typed out again,
-    so there is only ONE place that defines what the model sees.
-    """
-    with Path(stats_path).open("r", encoding="utf-8") as handle:
-        return json.load(handle)["feature_columns"]

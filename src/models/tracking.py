@@ -18,10 +18,18 @@ from pathlib import Path
 import mlflow
 import mlflow.sklearn
 import pandas as pd
+from mlflow import MlflowClient
+from mlflow.entities.model_registry import ModelVersion
 from mlflow.models import infer_signature
 from mlflow.models.model import ModelInfo
 
 from src.features.engineering import CYCLE_FEATURE
+
+# Registry aliases: movable name tags on model versions.
+#   champion   -- the version in use. Moved ONLY by scripts/promote_model.py.
+#   challenger -- the newest candidate. Moved by every training session.
+CHAMPION = "champion"
+CHALLENGER = "challenger"
 
 # MLflow saves scikit-learn models with skops rather than pickle, because
 # opening a pickle file can run any code hidden inside it. skops refuses to open
@@ -34,6 +42,25 @@ from src.features.engineering import CYCLE_FEATURE
 # our own training code, on a server only this computer can reach (compose.yaml
 # binds it to 127.0.0.1). Never add types just to make an unknown file load.
 SKOPS_TRUSTED_TYPES = ["sklearn.tree._tree.Tree"]
+
+
+def has_uncommitted_changes(repo_path: Path | str) -> bool | None:
+    """Does the code differ from its last Git commit (edited or new files)?
+
+    MLflow records the commit a run came from -- but if files had been edited
+    since that commit, the commit alone cannot reproduce the run. So we record
+    this too, rather than relying on everyone to remember to commit first.
+
+    Returns None if the folder is not a Git repository. Ignored files (data/,
+    models/) do not count -- they are not code.
+    """
+    try:
+        import git
+
+        repo = git.Repo(repo_path, search_parent_directories=True)
+    except Exception:  # not a repository, or git not available
+        return None
+    return repo.is_dirty(untracked_files=True)
 
 
 def resolve_tracking_uri(configured: str) -> str:
@@ -138,3 +165,22 @@ def log_trained_model(
     )
     mlflow.log_artifact(str(stats_path))
     return info
+
+
+def register_challenger(
+    client: MlflowClient,
+    model_uri: str,
+    registered_name: str,
+    description: str,
+) -> ModelVersion:
+    """Add a trained model to the registry as a new version tagged 'challenger'.
+
+    A new version number is created every time (versions are never
+    overwritten), and the 'challenger' tag moves to it. The 'champion' tag --
+    the version in use -- is deliberately NOT touched here: training a model
+    and putting it into use are separate decisions.
+    """
+    version = mlflow.register_model(model_uri, registered_name)
+    client.update_model_version(registered_name, version.version, description=description)
+    client.set_registered_model_alias(registered_name, CHALLENGER, version.version)
+    return version

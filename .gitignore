@@ -40,8 +40,9 @@ __pycache__/
 # Trained models
 #
 # Saved models are OUTPUTS of training, rebuilt from code + data at any time.
-# Like data, they do not belong in Git (a forest file is tens of MB). Later a
-# model registry will store and version them properly.
+# Like data, they do not belong in Git (a forest file is tens of MB). They live
+# in the MLflow model registry; nothing in the project writes models/ any more.
+# Kept as a safety net in case a model is ever saved locally by hand.
 # ---------------------------------------------------------------------------
 /models/
 

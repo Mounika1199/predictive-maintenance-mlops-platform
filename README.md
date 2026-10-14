@@ -17,7 +17,7 @@ This repository is built incrementally, one stage at a time.
 | Model training | Done (first models) |
 | Model evaluation | Done (first version) |
 | Experiment tracking (MLflow) | Done (server in Docker) |
-| Model registry | Not started |
+| Model registry | Done (champion/challenger, gated promotion) |
 | Model serving | Not started |
 | Monitoring & drift detection | Not started |
 | Retraining | Not started |
@@ -51,7 +51,8 @@ python scripts/validate_fd001.py            # check the data against that contra
 python scripts/build_features.py            # labels, split, features -> data/processed/
 docker compose up -d                        # MLflow server must be running for train.py
 python scripts/train.py                     # train, compare on validation, record in MLflow
-python scripts/evaluate.py                  # score the saved winner on the test set
+python scripts/promote_model.py             # put the challenger into use, if it is better
+python scripts/evaluate.py                  # score the champion on the test set
 python scripts/experiment_cycle_feature.py  # 5-fold experiment: does `cycle` help?
 pytest                                       # run the test suite (no Docker needed)
 ```
@@ -75,7 +76,6 @@ configs/reference_profile.json     Generated contract: per-column dtype/min/max
 data/raw/                          Original .txt files             (git-ignored)
 data/interim/                      Ingested Parquet tables         (git-ignored)
 data/processed/                    Model-ready features + stats    (git-ignored)
-models/                            Trained models + score records  (git-ignored)
 src/data/load_cmapss.py            Pure loading functions (importable, testable)
 src/data/validation.py             Schema building + structural checks
 src/data/split.py                  Engine-level train/validation split
@@ -83,13 +83,15 @@ src/features/labels.py             RUL target for train and test
 src/features/engineering.py        Sensor choice, rolling features, scaling
 src/models/metrics.py              RMSE, MAE, NASA score
 src/models/training.py             Building models, predicting (clipped at 0)
-src/models/tracking.py             MLflow helpers: server check, what to record
+src/models/tracking.py             MLflow helpers: server check, what to record, registry
+src/models/promotion.py            The rules for promoting a model to champion
 scripts/ingest_fd001.py            Entry point: loads raw, writes Parquet
 scripts/build_reference_profile.py Entry point: writes the reference profile
 scripts/validate_fd001.py          Entry point: validates, exits non-zero on failure
 scripts/build_features.py          Entry point: interim -> processed features
 scripts/train.py                   Entry point: train, select on validation, save
-scripts/evaluate.py                Entry point: score the saved model on test
+scripts/promote_model.py           Entry point: move the champion tag, after checks
+scripts/evaluate.py                Entry point: score the champion on test
 scripts/experiment_cycle_feature.py Experiment: cycle feature, 5-fold CV by engine
 tests/                             Pytest suite (shared setup in conftest.py)
 ```
@@ -251,10 +253,10 @@ model.
 ## Models and evaluation
 
 `train.py` trains three models on the 80 training engines, scores them on the 20
-validation engines, picks the lowest validation RMSE, and saves every model plus
-a record of the run (`models/selected.json`). It **never reads the test set**.
-`evaluate.py` then loads the saved winner -- training nothing -- and scores it on
-the test set.
+validation engines, picks the lowest validation RMSE, records everything in
+MLflow and registers the winner as a challenger (see *Model registry*). It
+**never reads the test set**. `evaluate.py` loads the registry's champion --
+training nothing -- and scores it on the test set.
 
 ### Results
 
@@ -322,7 +324,7 @@ trains becomes a **run** in the `rul-fd001` **experiment**, holding:
 |---|---|
 | Parameters (settings chosen beforehand) | the model's settings, and how the data was built: `rul_cap`, `rolling_window`, `include_cycle_feature`, `n_features`, split seed, engine counts |
 | Metrics (scores) | `val_rmse`, `val_mae` |
-| Tags | `selected` (true for the winner), the script, and the Git commit of the code |
+| Tags | `selected` (true for its session's winner), the script, the Git commit, and `git.uncommitted_changes` |
 | Files | the trained model with its input signature (46 columns), plus `feature_stats.json` -- the scaling numbers it needs |
 
 Data settings are read from `feature_stats.json`, which records how the processed
@@ -408,6 +410,62 @@ the forest. No change was needed -- it was already the default.
   folds: 23-36). On that fold both models did better *without* age. Age is a rule
   of thumb about the typical engine.
 
+## Model registry
+
+A catalogue of numbered model versions, with movable name tags (aliases):
+
+```
+rul-fd001
+ +- version 1
+ +- version 2
+ +- version 3   <- champion    (the version in use)
+ +- version 4   <- challenger  (the newest candidate)
+```
+
+Anything that needs "the model in use" asks for `models:/rul-fd001@champion` --
+no version numbers, run IDs or file paths. Upgrading means moving the tag; a
+rollback means moving it back. Versions are never overwritten or deleted, so an
+old champion stays loadable by number (`models:/rul-fd001/1`).
+
+Each version traces back to its run: settings, scores, Git commit, and whether
+the code had uncommitted changes (**lineage**).
+
+### Training a model and putting it into use are separate decisions
+
+1. `train.py` registers each session's winner as a **new version** and moves the
+   **`challenger`** tag to it. It never touches `champion`.
+2. `promote_model.py` is the **only** way `champion` moves. Before moving it,
+   it checks (rules in `src/models/promotion.py`):
+   * both versions were scored on the **same exam** -- same validation engines,
+     same answer key (`rul_cap`) -- otherwise their scores mean nothing side by
+     side;
+   * the challenger is better by at least `min_improvement_rmse` (0.1). Anything
+     smaller is a tie: a retrained copy of the champion can differ by ~1e-14 just
+     from the order the forest adds its trees.
+   * It warns if the challenger was trained from uncommitted code.
+3. `--force --reason "..."` overrides the checks (a rollback is the classic case).
+   A reason is required.
+
+Aliases keep no history, so every promotion writes its own record onto the
+promoted version: `promoted_at`, `promoted_from_version`, `promotion_reason`,
+`promotion_forced`. Exit codes: 0 promoted, 1 refused.
+
+```powershell
+python scripts/promote_model.py                              # consider the challenger
+python scripts/promote_model.py --version 1 --force --reason "roll back: v3 misbehaves"
+```
+
+### The registry is the only source
+
+There are no local model files. `evaluate.py` loads `rul-fd001@champion` and,
+before scoring, compares the current `feature_stats.json` -- every column and
+every scaling number -- with the copy stored on the champion's run. Data
+prepared differently from the model's training data (**training/serving skew**)
+never crashes; it just makes every prediction slightly wrong. A change of 0.01 to
+a single average is enough to stop the evaluation. Test scores are written back
+to MLflow: `test_*` metrics on the champion's run, a `test_rmse` tag on its
+version.
+
 ## Notes for later stages
 
 * **Ingestion is intentionally lossless.** RUL labels and features are computed
@@ -428,15 +486,17 @@ the forest. No change was needed -- it was already the default.
   `engine_folds()` exists for this.
 * **The forest is still slightly optimistic near failure** (+6.4 cycles on
   validation, +5.4 on test). The direction to improve.
-* **Two records of the selected model.** MLflow now holds every run, but
-  `evaluate.py` still reads the local `models/` folder and `selected.json` (which
-  records the MLflow run IDs, so the two link up). A model registry should
-  become the single place a model is fetched from.
-* **The stored model does not include the clip-at-zero rule.** That lives in
-  `predict_rul()`. The forest never predicts below zero anyway, but serving must
-  apply the same rule.
-* **The Git commit tag does not see uncommitted changes.** Commit before
-  training runs you want to be able to reproduce.
+* **The stored model does not include the clip-at-zero rule, or its scaling.**
+  Those live in `predict_rul()` and in the run's `feature_stats.json`. Serving
+  must apply both exactly as `evaluate.py` does -- the skew check there is the
+  pattern to follow.
+* **Commit before training runs you want to reproduce.** Runs now record
+  `git.uncommitted_changes`, and promotion warns about it, but a run trained from
+  uncommitted code still cannot be rebuilt from its commit.
+* **Lineage stops at the data.** A version traces back to its code and data
+  settings, but not to the exact data files: `data/` is not versioned (DVC).
+* **Old versions accumulate.** Nothing deletes them, which is what rollbacks and
+  audits need. A clean-up rule (e.g. archive after a year) can come later.
 * **Compare parallel predictions within a tolerance.** With `n_jobs: -1` the
   forest adds its trees' answers in a varying order, so repeated predictions
   differ by ~1e-14. Exact comparisons need one core.

@@ -1,11 +1,9 @@
-"""Tests for building, saving and using models."""
+"""Tests for building and using models."""
 
 from __future__ import annotations
 
-import json
 from pathlib import Path
 
-import joblib
 import numpy as np
 import pandas as pd
 import pytest
@@ -14,7 +12,7 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.linear_model import LinearRegression
 
 from src.models.metrics import rmse
-from src.models.training import build_model, load_feature_columns, predict_rul
+from src.models.training import build_model, predict_rul
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -65,7 +63,7 @@ def test_predictions_are_never_negative() -> None:
 
 
 # ---------------------------------------------------------------------------
-# Reproducibility and saving
+# Reproducibility
 # ---------------------------------------------------------------------------
 
 
@@ -78,25 +76,8 @@ def test_same_random_state_gives_the_same_forest() -> None:
 
     np.testing.assert_array_equal(a.predict(X), b.predict(X))
 
-
-def test_saved_model_loads_back_identical(tmp_path: Path) -> None:
-    """Train once, save, load somewhere else: the predictions must not change."""
-    X, y = tiny_data()
-    model = build_model("random_forest", {"n_estimators": 10}).fit(X, y)
-
-    path = tmp_path / "model.joblib"
-    joblib.dump(model, path)
-    loaded = joblib.load(path)
-
-    np.testing.assert_array_equal(model.predict(X), loaded.predict(X))
-
-
-def test_feature_list_is_read_in_its_saved_order(tmp_path: Path) -> None:
-    """The model needs its columns in the exact order it learned them."""
-    path = tmp_path / "feature_stats.json"
-    path.write_text(json.dumps({"feature_columns": ["b", "a", "c"]}), encoding="utf-8")
-
-    assert load_feature_columns(path) == ["b", "a", "c"]
+# Saving and reloading a model is tested through MLflow, the way the project
+# actually saves models: see test_tracking.py.
 
 
 # ---------------------------------------------------------------------------
