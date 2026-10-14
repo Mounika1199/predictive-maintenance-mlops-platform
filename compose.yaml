@@ -1,0 +1,57 @@
+# ---------------------------------------------------------------------------
+# The MLflow tracking server, running inside a Docker container.
+#
+#   Start:      docker compose up -d            (-d = run in the background)
+#   Status:     docker compose ps
+#   Logs:       docker compose logs -f mlflow
+#   Stop:       docker compose down             (your experiment history is kept)
+#   Web page:   http://localhost:5000
+#
+# Our project is only a CLIENT: scripts/train.py sends its results here over
+# the network. The server software lives in this container, not in mlops_env.
+#
+# (Older tutorials call this file docker-compose.yml. compose.yaml is the
+# current standard name; Docker accepts both.)
+# ---------------------------------------------------------------------------
+
+services:
+  mlflow:
+    # A ready-made "box" published by the MLflow project. The version is pinned
+    # for the same reason as requirements.txt: the server must not change under
+    # us, and it must match the MLflow client version in requirements.txt.
+    image: ghcr.io/mlflow/mlflow:v3.17.1
+    container_name: mlflow-server
+
+    # The program to run inside the box.
+    #   --host 0.0.0.0   accept connections coming from OUTSIDE the container
+    #                    (the default would only listen to itself).
+    #   --backend-store-uri   where run settings and scores go: a small SQLite
+    #                    database file. Four slashes = the absolute path
+    #                    /mlflow/mlflow.db inside the container.
+    #   --artifacts-destination   where files go (saved models, etc.). The
+    #                    server receives them over HTTP, so our project never
+    #                    needs to touch this folder directly.
+    command: >
+      mlflow server
+      --host 0.0.0.0
+      --port 5000
+      --backend-store-uri sqlite:////mlflow/mlflow.db
+      --artifacts-destination /mlflow/artifacts
+
+    # "Windows port : container port". 127.0.0.1 means only THIS computer can
+    # reach it. That matters: the MLflow server has no login, so it must not be
+    # exposed to everyone else on your network.
+    ports:
+      - "127.0.0.1:5000:5000"
+
+    # A container's own files vanish when the container is deleted. A VOLUME is
+    # storage that Docker keeps separately, so the database and saved models
+    # survive restarts, upgrades, and `docker compose down`.
+    volumes:
+      - mlflow_data:/mlflow
+
+    # Start again automatically when Docker starts, unless you stopped it.
+    restart: unless-stopped
+
+volumes:
+  mlflow_data:

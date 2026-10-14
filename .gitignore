@@ -44,3 +44,14 @@ __pycache__/
 # model registry will store and version them properly.
 # ---------------------------------------------------------------------------
 /models/
+
+# ---------------------------------------------------------------------------
+# Local MLflow storage -- a safety net
+#
+# Runs belong on the MLflow server in Docker (compose.yaml). But if MLflow is
+# ever used without a server address, it falls back to writing a local
+# mlflow.db file or mlruns/ folder in whatever directory you are in. Those are
+# run history and model files, never source code.
+# ---------------------------------------------------------------------------
+mlflow.db
+mlruns/

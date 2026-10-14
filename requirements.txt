@@ -1,5 +1,5 @@
 # Dependencies are added ONLY in the task that needs them, and each one is
-# justified. No MLflow / DVC / FastAPI yet -- those arrive later.
+# justified. No DVC / FastAPI yet -- those arrive later.
 #
 # Versions are pinned (==) so that this environment can be rebuilt identically
 # on another machine, in Docker, or in CI. "It worked yesterday" is not a
@@ -23,3 +23,16 @@ pandera==0.33.1
 # which we use to save trained models to disk. Arrives now because this is the
 # first task that trains a model.
 scikit-learn==1.9.1
+
+# Experiment tracking -- the CLIENT only. The MLflow server runs in Docker
+# (compose.yaml); our project just sends it results over the network, so we
+# install the "skinny" client (33 packages) rather than full mlflow (70, with
+# the web server and database tooling we do not need here).
+# Must match the server version in compose.yaml.
+mlflow-skinny==3.17.1
+
+# Safe model files. MLflow saves scikit-learn models with skops rather than
+# pickle: loading a pickle file can run any code hidden inside it, so a
+# tampered model on a shared server could take over the machine that opens it.
+# skops only loads known, safe kinds of objects.
+skops==0.16.0

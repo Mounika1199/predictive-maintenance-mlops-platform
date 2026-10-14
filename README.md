@@ -16,7 +16,7 @@ This repository is built incrementally, one stage at a time.
 | RUL labelling & feature engineering | Done |
 | Model training | Done (first models) |
 | Model evaluation | Done (first version) |
-| Experiment tracking (MLflow) | Not started |
+| Experiment tracking (MLflow) | Done (server in Docker) |
 | Model registry | Not started |
 | Model serving | Not started |
 | Monitoring & drift detection | Not started |
@@ -28,7 +28,10 @@ This repository is built incrementally, one stage at a time.
 python -m venv mlops_env
 .\mlops_env\Scripts\Activate.ps1
 pip install -r requirements.txt
+docker compose up -d          # start the MLflow server (needs Docker Desktop)
 ```
+
+The MLflow server runs in a Docker container; see *Experiment tracking* below.
 
 The dataset is **not** in Git (see *Data* below). Place the three FD001 files in
 `data/raw/`:
@@ -46,9 +49,10 @@ python scripts/ingest_fd001.py              # raw .txt -> typed Parquet in data/
 python scripts/build_reference_profile.py   # regenerate the validation contract (rarely)
 python scripts/validate_fd001.py            # check the data against that contract
 python scripts/build_features.py            # labels, split, features -> data/processed/
-python scripts/train.py                     # train, compare on validation, save the winner
+docker compose up -d                        # MLflow server must be running for train.py
+python scripts/train.py                     # train, compare on validation, record in MLflow
 python scripts/evaluate.py                  # score the saved winner on the test set
-pytest                                       # run the test suite
+pytest                                       # run the test suite (no Docker needed)
 ```
 
 `build_features.py` reads the files written by `ingest_fd001.py`, so run
@@ -62,6 +66,7 @@ automatic gate in a pipeline or in CI later.
 ## Project layout
 
 ```
+compose.yaml                       The MLflow server, run as a Docker container
 configs/data.yaml                  Paths, column layout, expected shapes, tolerances
 configs/features.yaml              Modelling choices: RUL cap, split, rolling window
 configs/training.yaml              Which models to train, and their settings
@@ -77,6 +82,7 @@ src/features/labels.py             RUL target for train and test
 src/features/engineering.py        Sensor choice, rolling features, scaling
 src/models/metrics.py              RMSE, MAE, NASA score
 src/models/training.py             Building models, predicting (clipped at 0)
+src/models/tracking.py             MLflow helpers: server check, what to record
 scripts/ingest_fd001.py            Entry point: loads raw, writes Parquet
 scripts/build_reference_profile.py Entry point: writes the reference profile
 scripts/validate_fd001.py          Entry point: validates, exits non-zero on failure
@@ -305,6 +311,65 @@ predicted than there really was) -- the dangerous direction.
   the model said 70. That one engine is 19% of the whole NASA score. A real
   system would add a safety margin or report how confident the model is.
 
+## Experiment tracking (MLflow)
+
+MLflow is a logbook for experiments. Every time `train.py` runs, each model it
+trains becomes a **run** in the `rul-fd001` **experiment**, holding:
+
+| Kind | What is recorded |
+|---|---|
+| Parameters (settings chosen beforehand) | the model's settings, and how the data was built: `rul_cap`, `rolling_window`, `include_cycle_feature`, `n_features`, split seed, engine counts |
+| Metrics (scores) | `val_rmse`, `val_mae` |
+| Tags | `selected` (true for the winner), the script, and the Git commit of the code |
+| Files | the trained model with its input signature (46 columns), plus `feature_stats.json` -- the scaling numbers it needs |
+
+Data settings are read from `feature_stats.json`, which records how the processed
+data was *actually* built, not from `configs/features.yaml`, which may have been
+edited since. Two runs with identical model settings but different data are
+different experiments and look different in MLflow.
+
+### The server runs in Docker
+
+```
+YOUR PROJECT (Windows)                         DOCKER CONTAINER
+scripts/train.py  -- sends results -->   MLflow server (127.0.0.1:5000)
+                     over HTTP             +- settings + scores -> SQLite database
+                                           +- trained models    -> files
+your browser  -- http://localhost:5000 --> the MLflow web page
+```
+
+* `compose.yaml` runs the official image `ghcr.io/mlflow/mlflow:v3.17.1`.
+* The project installs only the **client**, `mlflow-skinny` (33 packages instead of
+  70 for full MLflow). Its version must match the server's; a test checks this.
+* Data lives in the Docker **volume** `mlflow_data`, so history survives restarts
+  and `docker compose down`. Only `docker compose down -v` deletes it.
+* The port is bound to `127.0.0.1`: only this computer can reach the server,
+  which has no login.
+* `train.py` checks the server is reachable *before* training, and stops with
+  "start it with `docker compose up -d`" if not.
+
+```powershell
+docker compose ps          # is it running?
+docker compose logs -f     # what is it doing?
+docker compose down        # stop it (history kept)
+```
+
+### Safe model files
+
+MLflow saves scikit-learn models with **skops** instead of pickle: opening a
+pickle file can run any code hidden inside it. skops refuses object types it
+cannot prove safe. A random forest's flowcharts (`sklearn.tree._tree.Tree`)
+are one such type, so exactly that type is trusted, in
+`src/models/tracking.py` -- acceptable because we create these files ourselves,
+on a server only this computer can reach. A test fails if more types are added
+without updating it deliberately.
+
+### Windows note
+
+MLflow prints messages containing emoji, which the default Windows terminal
+character set cannot show; Python crashed mid-run and left a run stuck as
+RUNNING. `train.py` switches its own output to UTF-8 to prevent this.
+
 ## Notes for later stages
 
 * **Ingestion is intentionally lossless.** RUL labels and features are computed
@@ -322,5 +387,15 @@ predicted than there really was) -- the dangerous direction.
   with and without it and compare -- on validation.
 * **The forest is still slightly optimistic near failure** (+6.4 cycles on
   validation, +5.4 on test). The direction to improve.
-* **`models/selected.json` is written by hand.** Recording every run's settings
-  and scores, and comparing runs, is what experiment tracking (MLflow) automates.
+* **Two records of the selected model.** MLflow now holds every run, but
+  `evaluate.py` still reads the local `models/` folder and `selected.json` (which
+  records the MLflow run IDs, so the two link up). A model registry should
+  become the single place a model is fetched from.
+* **The stored model does not include the clip-at-zero rule.** That lives in
+  `predict_rul()`. The forest never predicts below zero anyway, but serving must
+  apply the same rule.
+* **The Git commit tag does not see uncommitted changes.** Commit before
+  training runs you want to be able to reproduce.
+* **Compare parallel predictions within a tolerance.** With `n_jobs: -1` the
+  forest adds its trees' answers in a varying order, so repeated predictions
+  differ by ~1e-14. Exact comparisons need one core.

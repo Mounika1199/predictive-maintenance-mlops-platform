@@ -29,3 +29,13 @@ selection_metric: rmse
 
 output:
   model_dir: models
+
+# Where every training run is recorded. The MLflow server runs in Docker
+# (see compose.yaml -- start it with `docker compose up -d`).
+#
+# If the standard MLFLOW_TRACKING_URI environment variable is set, it wins over
+# tracking_uri below. That lets tests, or another machine, point somewhere else
+# without editing this file.
+mlflow:
+  tracking_uri: http://localhost:5000
+  experiment_name: rul-fd001
