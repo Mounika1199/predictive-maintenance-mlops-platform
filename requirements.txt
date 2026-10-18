@@ -1,5 +1,5 @@
 # Dependencies are added ONLY in the task that needs them, and each one is
-# justified. No DVC / FastAPI yet -- those arrive later.
+# justified. No FastAPI yet -- it arrives with model serving.
 #
 # Versions are pinned (==) so that this environment can be rebuilt identically
 # on another machine, in Docker, or in CI. "It worked yesterday" is not a
@@ -19,9 +19,8 @@ pandera==0.33.1
 
 # Machine learning. scikit-learn provides the models (linear regression, random
 # forest, and a "predict the average" baseline) behind one shared fit/predict
-# interface, so swapping models is a one-line change. It also brings joblib,
-# which we use to save trained models to disk. Arrives now because this is the
-# first task that trains a model.
+# interface, so swapping models is a one-line change. Arrives now because this
+# is the first task that trains a model.
 scikit-learn==1.9.1
 
 # Experiment tracking -- the CLIENT only. The MLflow server runs in Docker
@@ -36,3 +35,11 @@ mlflow-skinny==3.17.1
 # tampered model on a shared server could take over the machine that opens it.
 # skops only loads known, safe kinds of objects.
 skops==0.16.0
+
+# Data versioning and the data pipeline. Git cannot hold data, so DVC keeps the
+# real files in separate storage and gives Git small pointer files with their
+# fingerprints -- every commit then pins an exact data version. Its pipeline
+# (dvc.yaml) re-runs only the steps whose inputs changed, so outputs can never
+# silently go stale. A large install (73 packages, partly features we do not
+# use), but it changes none of the versions pinned above.
+dvc==3.67.1

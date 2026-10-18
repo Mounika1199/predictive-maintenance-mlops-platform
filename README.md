@@ -12,7 +12,7 @@ This repository is built incrementally, one stage at a time.
 |---|---|
 | Data ingestion | Done |
 | Data validation | Done |
-| Data versioning (DVC) | Not started |
+| Data versioning (DVC) | Done (pointer files, local storage, data pipeline) |
 | RUL labelling & feature engineering | Done |
 | Model training | Done (first models) |
 | Model evaluation | Done (first version) |
@@ -28,27 +28,35 @@ This repository is built incrementally, one stage at a time.
 python -m venv mlops_env
 .\mlops_env\Scripts\Activate.ps1
 pip install -r requirements.txt
+dvc pull                      # fetch the data from DVC storage (see below)
 docker compose up -d          # start the MLflow server (needs Docker Desktop)
+setx MLFLOW_DISABLE_TELEMETRY true   # once per machine; see the telemetry note
 ```
 
 The MLflow server runs in a Docker container; see *Experiment tracking* below.
 
-The dataset is **not** in Git (see *Data* below). Place the three FD001 files in
-`data/raw/`:
+The dataset is **not** in Git. Git holds only the pointer file `data/raw.dvc`;
+`dvc pull` fetches the files themselves from DVC storage (see *Data versioning*).
+The storage location is a per-machine setting, kept in `.dvc/config.local`
+(never committed, so no local paths are published). On a new machine, tell DVC
+where your copy of the storage is, once:
 
+```powershell
+dvc remote add --local -d localstore <folder>   # e.g. a folder outside the project
 ```
-data/raw/train_FD001.txt
-data/raw/test_FD001.txt
-data/raw/RUL_FD001.txt
-```
+
+Or place the three FD001 files in `data/raw/` by hand.
+
+**Telemetry.** DVC and MLflow both send anonymous usage statistics by default.
+Both are switched off: DVC in `.dvc/config`, the MLflow server in
+`compose.yaml`, and the MLflow client by the `MLFLOW_DISABLE_TELEMETRY`
+environment variable above (it takes effect in newly opened terminals).
 
 ## Usage
 
 ```powershell
-python scripts/ingest_fd001.py              # raw .txt -> typed Parquet in data/interim/
+dvc repro                                   # validate -> ingest -> build_features (only what's out of date)
 python scripts/build_reference_profile.py   # regenerate the validation contract (rarely)
-python scripts/validate_fd001.py            # check the data against that contract
-python scripts/build_features.py            # labels, split, features -> data/processed/
 docker compose up -d                        # MLflow server must be running for train.py
 python scripts/train.py                     # train, compare on validation, record in MLflow
 python scripts/promote_model.py             # put the challenger into use, if it is better
@@ -57,25 +65,27 @@ python scripts/experiment_cycle_feature.py  # 5-fold experiment: does `cycle` he
 pytest                                       # run the test suite (no Docker needed)
 ```
 
-`build_features.py` reads the files written by `ingest_fd001.py`, so run
-ingestion first. If the loading code changes, re-run ingestion too -- the files
-in `data/interim/` do not update themselves. (Tracking which outputs are out of
-date is one of the jobs DVC will take over in a later stage.)
-
-`validate_fd001.py` exits non-zero when validation fails, so it can become an
-automatic gate in a pipeline or in CI later.
+`dvc repro` runs the data scripts (`validate_fd001.py`, `ingest_fd001.py`,
+`build_features.py`) in order, and only those whose inputs changed. It calls
+`python`, so activate `mlops_env` first. `train.py` refuses to run if the
+pipeline is out of date.
 
 ## Project layout
 
 ```
 compose.yaml                       The MLflow server, run as a Docker container
+dvc.yaml                           The data pipeline: validate -> ingest -> build_features
+dvc.lock                           The pipeline's receipt: fingerprints of every input/output
+.dvc/config                        DVC settings: analytics off (storage path: config.local)
 configs/data.yaml                  Paths, column layout, expected shapes, tolerances
 configs/features.yaml              Modelling choices: RUL cap, split, rolling window
 configs/training.yaml              Which models to train, and their settings
 configs/reference_profile.json     Generated contract: per-column dtype/min/max
-data/raw/                          Original .txt files             (git-ignored)
-data/interim/                      Ingested Parquet tables         (git-ignored)
-data/processed/                    Model-ready features + stats    (git-ignored)
+data/raw.dvc                       Pointer file: the raw data's fingerprint (in Git)
+data/raw/                          Original .txt files             (DVC-tracked)
+data/validation/report.json        Validation verdict: the pipeline's gate (DVC)
+data/interim/                      Ingested Parquet tables         (DVC pipeline)
+data/processed/                    Model-ready features + stats    (DVC pipeline)
 src/data/load_cmapss.py            Pure loading functions (importable, testable)
 src/data/validation.py             Schema building + structural checks
 src/data/split.py                  Engine-level train/validation split
@@ -87,9 +97,9 @@ src/models/tracking.py             MLflow helpers: server check, what to record,
 src/models/promotion.py            The rules for promoting a model to champion
 scripts/ingest_fd001.py            Entry point: loads raw, writes Parquet
 scripts/build_reference_profile.py Entry point: writes the reference profile
-scripts/validate_fd001.py          Entry point: validates, exits non-zero on failure
+scripts/validate_fd001.py          Entry point: validates, writes the gate report, exit 1 on failure
 scripts/build_features.py          Entry point: interim -> processed features
-scripts/train.py                   Entry point: train, select on validation, save
+scripts/train.py                   Entry point: train, select on validation, register
 scripts/promote_model.py           Entry point: move the champion tag, after checks
 scripts/evaluate.py                Entry point: score the champion on test
 scripts/experiment_cycle_feature.py Experiment: cycle feature, 5-fold CV by engine
@@ -124,10 +134,10 @@ unit_number  time_in_cycles  op_setting_1..3  sensor_1..21
 
 ### Data is not stored in Git
 
-`data/` is git-ignored. Git stores a complete copy of every version of every
-file; putting datasets in it makes the repository permanently large and slow.
-Data versioning is handled by DVC in a later stage, which keeps the data
-elsewhere and only a small pointer file in Git.
+Git stores a complete copy of every version of every file; putting datasets in
+it makes the repository permanently large and slow. So the data lives in DVC
+storage, and Git holds only small pointer files -- see *Data versioning and the
+pipeline (DVC)*.
 
 ### Parsing gotcha
 
@@ -466,6 +476,76 @@ a single average is enough to stop the evaluation. Test scores are written back
 to MLflow: `test_*` metrics on the champion's run, a `test_rmse` tag on its
 version.
 
+## Data versioning and the pipeline (DVC)
+
+DVC does for data what Git does for code. The real files live in DVC
+**storage**; Git holds only a small **pointer file** with each dataset's
+fingerprint (a hash that changes if a single byte changes). Every commit
+therefore pins an exact version of the data.
+
+```
+Git (the catalogue)                  DVC storage (the bookshelf)
+data/raw.dvc  --fingerprint-->       a storage folder outside the project
+  a095ca28....dir                      each file stored under its own fingerprint
+```
+
+```powershell
+dvc pull       # get the data for the current commit from storage
+dvc push       # send new data versions to storage
+dvc status     # what is out of date, and why
+dvc repro      # rebuild what is out of date -- and nothing else
+```
+
+Tested end to end: with `data/raw` **and** DVC's local cache deleted, `dvc pull`
+restored every file byte for byte.
+
+### The pipeline
+
+```
+data/raw --> validate --> data/validation/report.json --+
+    |                                                    v
+    +--------------------------------------------> ingest --> data/interim --> build_features --> data/processed
+```
+
+`dvc.yaml` lists each step's command, what it reads (including its own code) and
+what it writes; `dvc.lock` is the receipt -- the fingerprints of all of it from
+the last run. `dvc repro` compares the two and re-runs only what changed:
+
+| Change | What re-runs |
+|---|---|
+| nothing | nothing (about 1 second) |
+| `rolling_window` in `features.yaml` | only `build_features` |
+| a setting changed back to one already built | nothing -- restored from DVC's run cache |
+
+**Validation is a real gate.** `ingest` depends on validation's report, so if
+validation fails (exit code 1) nothing downstream runs. The report contains no
+timestamp: an unchanged result gives an identical file, so re-validating does
+not trigger rebuilds.
+
+**Training is not a pipeline step**, on purpose: each training run registers a
+new challenger, so it stays a deliberate command.
+
+### Lineage now reaches the data
+
+`train.py` refuses to train if `dvc status` reports anything out of date (the
+stale `data/interim/` of Task 3 is now impossible), and records two parameters
+on every run:
+
+* `data_raw_md5` -- the raw files' fingerprint, from `data/raw.dvc`
+* `data_processed_md5` -- the model-ready tables' fingerprint, from `dvc.lock`
+
+So any registered version traces back through its run to the exact data:
+`rul-fd001 vN -> run -> data_processed_md5 -> the commit whose dvc.lock holds
+it -> git checkout + dvc checkout`.
+
+### A .gitignore trap
+
+`data/` contents are hidden from Git with `/data/?*`, and pointer files shown
+with `!/data/*.dvc`. The obvious `/data/*` is wrong: `*` can match nothing, so
+it also matches the folder `data/` itself. DVC asks "is `data/` ignored?" when
+searching for pointer files, got "yes", and `dvc push` reported "Everything is
+up to date" while pushing nothing. A test now asks DVC directly.
+
 ## Notes for later stages
 
 * **Ingestion is intentionally lossless.** RUL labels and features are computed
@@ -493,8 +573,17 @@ version.
 * **Commit before training runs you want to reproduce.** Runs now record
   `git.uncommitted_changes`, and promotion warns about it, but a run trained from
   uncommitted code still cannot be rebuilt from its commit.
-* **Lineage stops at the data.** A version traces back to its code and data
-  settings, but not to the exact data files: `data/` is not versioned (DVC).
+* **Promotion's "same exam" could include the raw data fingerprint.** Two
+  versions validated on different raw data are not comparable either; today
+  only the split seed, engine counts and RUL cap are checked. Versions before
+  DVC have no fingerprint, so adding it would need one deliberate forced
+  promotion.
+* **Only `train.py` checks for a stale pipeline.** `evaluate.py` and the
+  experiment script read DVC outputs too; `evaluate.py`'s skew check catches
+  mismatched features, but neither refuses stale data outright.
+* **DVC storage is a local folder.** Its path lives in `.dvc/config.local`, so
+  it is per machine and nothing is shared. Shared or cloud storage (S3, MinIO)
+  would be one `dvc remote add` in `.dvc/config`.
 * **Old versions accumulate.** Nothing deletes them, which is what rollbacks and
   audits need. A clean-up rule (e.g. archive after a year) can come later.
 * **Compare parallel predictions within a tolerance.** With `n_jobs: -1` the

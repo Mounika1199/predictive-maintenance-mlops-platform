@@ -1,0 +1,107 @@
+schema: '2.0'
+stages:
+  validate:
+    cmd: python scripts/validate_fd001.py --report data/validation/report.json
+    deps:
+    - path: configs/data.yaml
+      hash: md5
+      md5: 5340823792b8fd8913bf259e1dd65669
+      size: 2318
+    - path: configs/reference_profile.json
+      hash: md5
+      md5: 8e2909b532da26722f31e11b016deeb1
+      size: 3894
+    - path: data/raw
+      hash: md5
+      md5: a095ca284cf82dbdebb6fca841bf80ca.dir
+      size: 5778461
+      nfiles: 3
+    - path: scripts/validate_fd001.py
+      hash: md5
+      md5: 85b56d0e975b277381d68f72c36d7ce2
+      size: 4570
+    - path: src/data/load_cmapss.py
+      hash: md5
+      md5: f8ed866c397bda2cde557bd88b92215a
+      size: 7030
+    - path: src/data/validation.py
+      hash: md5
+      md5: 13a13dd3c284d802a127f964d85f2152
+      size: 14786
+    outs:
+    - path: data/validation/report.json
+      hash: md5
+      md5: 2a423c8961342efd5a52a6565ae11d6c
+      size: 316
+  ingest:
+    cmd: python scripts/ingest_fd001.py
+    deps:
+    - path: configs/data.yaml
+      hash: md5
+      md5: 5340823792b8fd8913bf259e1dd65669
+      size: 2318
+    - path: data/raw
+      hash: md5
+      md5: a095ca284cf82dbdebb6fca841bf80ca.dir
+      size: 5778461
+      nfiles: 3
+    - path: data/validation/report.json
+      hash: md5
+      md5: 2a423c8961342efd5a52a6565ae11d6c
+      size: 316
+    - path: scripts/ingest_fd001.py
+      hash: md5
+      md5: f4dbb1f9849424bf04df4a4ff8672bdd
+      size: 4213
+    - path: src/data/load_cmapss.py
+      hash: md5
+      md5: f8ed866c397bda2cde557bd88b92215a
+      size: 7030
+    outs:
+    - path: data/interim
+      hash: md5
+      md5: a6d997b5b6e85715651daeb9f278e1bf.dir
+      size: 875785
+      nfiles: 3
+  build_features:
+    cmd: python scripts/build_features.py
+    deps:
+    - path: configs/data.yaml
+      hash: md5
+      md5: 5340823792b8fd8913bf259e1dd65669
+      size: 2318
+    - path: configs/features.yaml
+      hash: md5
+      md5: 80b96cb2de09b3b11ddf4a1048e86d16
+      size: 2789
+    - path: data/interim
+      hash: md5
+      md5: a6d997b5b6e85715651daeb9f278e1bf.dir
+      size: 875785
+      nfiles: 3
+    - path: scripts/build_features.py
+      hash: md5
+      md5: 031ddd2736a78c722d515f7fd64dd5fa
+      size: 5974
+    - path: src/data/load_cmapss.py
+      hash: md5
+      md5: f8ed866c397bda2cde557bd88b92215a
+      size: 7030
+    - path: src/data/split.py
+      hash: md5
+      md5: b9052d2f6d5200db83dcecfc5403ff84
+      size: 4452
+    - path: src/features/engineering.py
+      hash: md5
+      md5: e89be7c8b935ca5dd9026d1cd2a867f2
+      size: 8028
+    - path: src/features/labels.py
+      hash: md5
+      md5: 09c6f1468de2caa30f89624a9d8f896d
+      size: 4590
+    outs:
+    - path: data/processed
+      hash: md5
+      md5: de03fe245e1ec1953e8d00220cd49422.dir
+      size: 7333643
+      nfiles: 4

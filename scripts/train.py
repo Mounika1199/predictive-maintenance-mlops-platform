@@ -2,11 +2,12 @@
 
     python scripts/train.py
 
-Run AFTER scripts/build_features.py, with the MLflow server running
-(`docker compose up -d`). Reads data/processed/; everything it produces goes to
-MLflow -- nothing is saved locally.
+Run AFTER `dvc repro` (which builds data/processed/), with the MLflow server
+running (`docker compose up -d`). Everything it produces goes to MLflow --
+nothing is saved locally.
 
 WHAT IT DOES
+0. Refuse to train if the DVC data pipeline is out of date ("run dvc repro").
 1. Check the MLflow server is reachable -- BEFORE spending time training.
 2. Train each model listed in configs/training.yaml on the 80 training engines.
    Each model becomes one MLflow RUN, holding its settings (parameters), its
@@ -39,11 +40,13 @@ from src.models.metrics import score  # noqa: E402
 from src.models.tracking import (  # noqa: E402
     CHAMPION,
     check_server,
+    data_versions,
     has_uncommitted_changes,
     log_trained_model,
     register_challenger,
     resolve_tracking_uri,
     run_params,
+    stale_pipeline_stages,
 )
 from src.models.training import build_model, predict_rul  # noqa: E402
 
@@ -71,8 +74,25 @@ def main() -> int:
     # (and replacing anything still unprintable) makes that impossible.
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+    data_config = load_config()
     feature_config = load_config(FEATURES_CONFIG)
     training_config = load_config(TRAINING_CONFIG)
+
+    # 0. Never train on stale data. DVC compares today's fingerprints of every
+    # pipeline input (raw files, settings, code) with its receipt, dvc.lock. If
+    # anything changed since the data was built, the features may not match.
+    stale = stale_pipeline_stages(PROJECT_ROOT)
+    if stale:
+        print(f"ERROR: the data pipeline is out of date ({', '.join(stale)}).")
+        print("Rebuild the data first:  dvc repro")
+        return 1
+
+    # The exact data this training uses -- recorded on every run below.
+    data_fingerprints = data_versions(
+        PROJECT_ROOT,
+        raw_dir=data_config["dataset"]["raw_dir"],
+        processed_dir=feature_config["output"]["processed_dir"],
+    )
 
     stats_path = PROJECT_ROOT / feature_config["output"]["stats_file"]
     feature_stats = json.loads(stats_path.read_text(encoding="utf-8"))
@@ -107,6 +127,7 @@ def main() -> int:
     for name, params in model_settings.items():
         with mlflow.start_run(run_name=name) as run:
             mlflow.log_params(run_params(name, params, random_state, feature_stats))
+            mlflow.log_params(data_fingerprints)  # which exact data (DVC)
             mlflow.set_tag("selected", "false")  # the winner is re-tagged below
             mlflow.set_tag("git.uncommitted_changes", str(uncommitted))
 

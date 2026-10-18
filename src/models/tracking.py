@@ -18,6 +18,7 @@ from pathlib import Path
 import mlflow
 import mlflow.sklearn
 import pandas as pd
+import yaml
 from mlflow import MlflowClient
 from mlflow.entities.model_registry import ModelVersion
 from mlflow.models import infer_signature
@@ -61,6 +62,56 @@ def has_uncommitted_changes(repo_path: Path | str) -> bool | None:
     except Exception:  # not a repository, or git not available
         return None
     return repo.is_dirty(untracked_files=True)
+
+
+def stale_pipeline_stages(project_root: Path | str) -> list[str]:
+    """Which DVC pipeline steps (or tracked data) are out of date?
+
+    The same check as `dvc status`: today's fingerprints of every input are
+    compared with the receipt in dvc.lock and the pointer files. An empty list
+    means everything is up to date.
+
+    Training on stale data was the silent mistake in Task 3 (data/interim had
+    been built before a loader change). With this check, it becomes impossible.
+    """
+    # Imported here rather than at the top: DVC is slow to import, and only
+    # training needs this check.
+    from dvc.repo import Repo
+
+    with Repo(str(project_root)) as repo:
+        return sorted(repo.status())
+
+
+def data_versions(
+    project_root: Path | str,
+    raw_dir: str = "data/raw",
+    processed_dir: str = "data/processed",
+) -> dict[str, str]:
+    """The fingerprints of the data a model is trained from.
+
+    * data_raw_md5       -- the raw files, from their pointer file (data/raw.dvc)
+    * data_processed_md5 -- the model-ready tables, from the pipeline's receipt
+                            (dvc.lock)
+
+    Logged on every training run, they complete the chain
+        registry version -> run -> exact data.
+    "unknown" if DVC's files are missing.
+    """
+    root = Path(project_root)
+    versions = {"data_raw_md5": "unknown", "data_processed_md5": "unknown"}
+
+    pointer = root / f"{raw_dir}.dvc"
+    if pointer.is_file():
+        versions["data_raw_md5"] = yaml.safe_load(pointer.read_text(encoding="utf-8"))["outs"][0]["md5"]
+
+    lock = root / "dvc.lock"
+    if lock.is_file():
+        stages = yaml.safe_load(lock.read_text(encoding="utf-8")).get("stages", {})
+        for stage in stages.values():
+            for out in stage.get("outs", []):
+                if out["path"] == processed_dir:
+                    versions["data_processed_md5"] = out["md5"]
+    return versions
 
 
 def resolve_tracking_uri(configured: str) -> str:

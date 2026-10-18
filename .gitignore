@@ -11,15 +11,27 @@ venv/
 # Data NEVER goes into Git. Git is built for small text files that change line
 # by line; it stores a full copy of every version of every binary file, so a
 # repo with datasets in it becomes enormous and slow forever (you cannot easily
-# undo it). In a later task we put data under DVC, which versions data properly
-# while keeping only a tiny pointer file in Git.
+# undo it). DVC versions the data instead: the files live in DVC's storage, and
+# Git gets only small POINTER files (*.dvc) holding each dataset's fingerprint.
 #
-# NOTE the leading slash: "/data/" matches ONLY the data directory at the
-# repository root. Without it, the pattern would match a directory named
-# "data" at ANY depth -- including our src/data/ Python package, which would
-# then be silently excluded from every commit.
+# So: hide everything INSIDE data/, except the pointer files.
+#   /data/?*        hide the contents of data/ (not the folder itself -- Git
+#                   cannot un-hide a file inside a folder hidden as a whole)
+#   !/data/*.dvc    ...but show the pointer files, which must be committed
+#
+# Why "?*" and not "*": "*" can match NOTHING, so "/data/*" also matches the
+# folder path "data/" itself. DVC asks "is data/ ignored?" (with the slash)
+# when searching for pointer files, got "yes", and never looked inside -- so
+# `dvc push` silently pushed nothing. "?*" means "at least one character", so
+# only things inside data/ match, never the folder itself.
+#
+# NOTE the leading slash: it anchors the pattern to the repository root.
+# Without it, "data" would match a directory at ANY depth -- including our
+# src/data/ Python package, which would then be silently excluded from every
+# commit.
 # ---------------------------------------------------------------------------
-/data/
+/data/?*
+!/data/*.dvc
 
 # ---------------------------------------------------------------------------
 # Python

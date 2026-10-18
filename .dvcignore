@@ -1,0 +1,9 @@
+# Add patterns of files dvc should ignore, which could improve
+# the performance. Learn more at
+# https://dvc.org/doc/user-guide/dvcignore
+
+# Python writes these cache files into code folders whenever it runs. They are
+# not code: if DVC saw them, any folder listed as a dependency would look
+# "changed" after every run and its pipeline step would re-run for nothing.
+__pycache__/
+*.pyc

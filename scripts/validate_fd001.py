@@ -1,10 +1,17 @@
 """Validate the FD001 tables against the committed reference profile.
 
     python scripts/validate_fd001.py
+    python scripts/validate_fd001.py --report data/validation/report.json
 
 Exits 0 if everything passes, 1 if anything fails. That exit code is the point:
-it is what lets this become an automatic gate in a pipeline or in CI later, so
-bad data stops rather than flowing on to a model.
+it is what lets this act as a gate, so bad data stops rather than flowing on to
+a model.
+
+--report also saves the verdict as a small JSON file. The DVC pipeline
+(dvc.yaml) uses that file as the gate: the ingest step depends on it, so if
+validation fails, nothing downstream runs. The report deliberately contains no
+date or time -- an unchanged result then produces an identical file, and DVC
+does not mistake "validated again" for "something changed".
 
 Note that we validate the TEST split against a profile built from TRAIN. That is
 not a mistake and it is not leakage -- nothing about test influenced the rules.
@@ -15,6 +22,8 @@ the test split is exactly where we would find out.
 
 from __future__ import annotations
 
+import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -38,7 +47,24 @@ def report(result: ValidationResult) -> None:
         print(f"         - {error}")
 
 
-def main() -> int:
+def write_report(path: Path, dataset_name: str, profile_name: str,
+                 results: list[ValidationResult]) -> None:
+    """Save the verdict. Sorted keys and no timestamp: same result, same file."""
+    document = {
+        "dataset": dataset_name,
+        "reference_profile": profile_name,
+        "passed": all(r.ok for r in results),
+        "tables": {r.name: {"rows": r.n_rows, "errors": r.errors} for r in results},
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(document, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Validate FD001 against the reference profile.")
+    parser.add_argument("--report", type=Path, help="also save the verdict to this JSON file")
+    args = parser.parse_args(argv)
+
     config = load_config()
     profile_path, range_tolerance, constant_tolerance = load_validation_settings(config)
 
@@ -70,10 +96,16 @@ def main() -> int:
         rul_errors.append("RUL truth engines do not match the test engines")
     if (rul["rul"] <= 0).any():
         rul_errors.append("RUL truth contains non-positive values")
-    report(ValidationResult("rul_truth", len(rul), rul_errors))
+    results.append(ValidationResult("rul_truth", len(rul), rul_errors))
+    report(results[-1])
 
-    failed = [r for r in results if not r.ok] + ([1] if rul_errors else [])
-    if failed:
+    # Written whether validation passed or failed: a failed report is useful
+    # evidence. (In the DVC pipeline, the non-zero exit code is what stops the
+    # downstream steps.)
+    if args.report:
+        write_report(args.report, dataset.name, profile_path.name, results)
+
+    if not all(r.ok for r in results):
         print("\nVALIDATION FAILED")
         return 1
 

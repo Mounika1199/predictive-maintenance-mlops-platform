@@ -1,0 +1,68 @@
+# ---------------------------------------------------------------------------
+# The data pipeline:   validate  -->  ingest  -->  build_features
+#                       (check)        (tidy)        (build)
+#
+#   dvc repro      run every step that is out of date, in order -- and skip the
+#                  rest. A step is out of date when anything in its `deps` has
+#                  changed since it last ran (data, settings, or its own code).
+#   dvc status     show which steps are out of date, without running anything.
+#
+# Each step lists:
+#   cmd   the command to run
+#   deps  everything it READS -- including its own code, so a code change
+#         re-runs it
+#   outs  everything it WRITES -- DVC fingerprints these, records them in
+#         dvc.lock, and keeps copies in its cache and storage (dvc push)
+#
+# DVC works out the order from these lists: a step that reads another step's
+# output runs after it.
+#
+# `python` means whichever Python comes first on your PATH, so activate the
+# project environment first:  .\mlops_env\Scripts\Activate.ps1
+#
+# Training is deliberately NOT a step here: every training run registers a new
+# challenger in the model registry, so it stays a deliberate, manual command.
+# ---------------------------------------------------------------------------
+
+stages:
+  # Check the raw data against the committed contract. Writes a small report,
+  # which `ingest` depends on: if validation fails (exit code 1), DVC stops and
+  # nothing downstream runs -- bad data never reaches a model.
+  validate:
+    cmd: python scripts/validate_fd001.py --report data/validation/report.json
+    deps:
+      - data/raw
+      - configs/data.yaml
+      - configs/reference_profile.json
+      - src/data/load_cmapss.py
+      - src/data/validation.py
+      - scripts/validate_fd001.py
+    outs:
+      - data/validation/report.json
+
+  # Raw .txt files -> typed Parquet tables.
+  ingest:
+    cmd: python scripts/ingest_fd001.py
+    deps:
+      - data/raw
+      - data/validation/report.json   # the gate
+      - configs/data.yaml
+      - src/data/load_cmapss.py
+      - scripts/ingest_fd001.py
+    outs:
+      - data/interim
+
+  # Labels, engine split, features, scaling -> model-ready tables.
+  build_features:
+    cmd: python scripts/build_features.py
+    deps:
+      - data/interim
+      - configs/data.yaml
+      - configs/features.yaml
+      - src/data/load_cmapss.py
+      - src/data/split.py
+      - src/features/labels.py
+      - src/features/engineering.py
+      - scripts/build_features.py
+    outs:
+      - data/processed

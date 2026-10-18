@@ -50,6 +50,12 @@ services:
     volumes:
       - mlflow_data:/mlflow
 
+    # MLflow 3 sends anonymous usage statistics by default. Switched off: nothing
+    # about this project needs to leave this machine. (Our scripts -- the client
+    # side -- need the same setting in your environment; see the README.)
+    environment:
+      MLFLOW_DISABLE_TELEMETRY: "true"
+
     # Start again automatically when Docker starts, unless you stopped it.
     restart: unless-stopped
 
