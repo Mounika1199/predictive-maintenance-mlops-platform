@@ -1,5 +1,5 @@
 # Dependencies are added ONLY in the task that needs them, and each one is
-# justified. No FastAPI yet -- it arrives with model serving.
+# justified.
 #
 # Versions are pinned (==) so that this environment can be rebuilt identically
 # on another machine, in Docker, or in CI. "It worked yesterday" is not a
@@ -43,3 +43,17 @@ skops==0.16.0
 # silently go stale. A large install (73 packages, partly features we do not
 # use), but it changes none of the versions pinned above.
 dvc==3.67.1
+
+# Model serving. FastAPI turns Python functions into web addresses and checks
+# every request's shape (via pydantic); uvicorn is the server that runs it.
+# Both were already installed as dependencies of mlflow-skinny (which only asks
+# for "below 1.0"); we pin the installed versions because we now use them
+# directly -- an MLflow upgrade must not be able to swap our web framework.
+fastapi==0.143.0
+uvicorn==0.54.0
+
+# Testing the service. FastAPI's TestClient sends requests to the app inside
+# the test itself -- no running server, no network, no MLflow. It needs httpx2:
+# Starlette (which FastAPI is built on) tries httpx2 first, and its fallback to
+# the older httpx is deprecated and due to be removed.
+httpx2==2.16.0

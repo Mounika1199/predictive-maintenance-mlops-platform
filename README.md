@@ -18,7 +18,7 @@ This repository is built incrementally, one stage at a time.
 | Model evaluation | Done (first version) |
 | Experiment tracking (MLflow) | Done (server in Docker) |
 | Model registry | Done (champion/challenger, gated promotion) |
-| Model serving | Not started |
+| Model serving | Done (FastAPI, run locally; Docker next) |
 | Monitoring & drift detection | Not started |
 | Retraining | Not started |
 
@@ -62,6 +62,7 @@ python scripts/train.py                     # train, compare on validation, reco
 python scripts/promote_model.py             # put the challenger into use, if it is better
 python scripts/evaluate.py                  # score the champion on the test set
 python scripts/experiment_cycle_feature.py  # 5-fold experiment: does `cycle` help?
+uvicorn src.serving.app:app --port 8000     # the prediction service; docs at http://127.0.0.1:8000/docs
 pytest                                       # run the test suite (no Docker needed)
 ```
 
@@ -95,6 +96,10 @@ src/models/metrics.py              RMSE, MAE, NASA score
 src/models/training.py             Building models, predicting (clipped at 0)
 src/models/tracking.py             MLflow helpers: server check, what to record, registry
 src/models/promotion.py            The rules for promoting a model to champion
+src/serving/predictor.py           Raw readings -> features -> prediction (reuses src/features)
+src/serving/checks.py              Request checks: history (refuse), contract (warn)
+src/serving/schemas.py             Request/response shapes, checked by FastAPI
+src/serving/app.py                 The web service: /health, /model, /predict
 scripts/ingest_fd001.py            Entry point: loads raw, writes Parquet
 scripts/build_reference_profile.py Entry point: writes the reference profile
 scripts/validate_fd001.py          Entry point: validates, writes the gate report, exit 1 on failure
@@ -546,6 +551,52 @@ it also matches the folder `data/` itself. DVC asks "is `data/` ignored?" when
 searching for pointer files, got "yes", and `dvc push` reported "Everything is
 up to date" while pushing nothing. A test now asks DVC directly.
 
+## Model serving
+
+A small web service (FastAPI, run by uvicorn) answers "here are this engine's
+readings -- how long has it got?" for other systems.
+
+```powershell
+docker compose up -d                          # MLflow must be running
+uvicorn src.serving.app:app --port 8000       # then open http://127.0.0.1:8000/docs
+```
+
+| Address | Purpose |
+|---|---|
+| `GET /health` | "are you alive?" -- for monitoring tools |
+| `GET /model` | which version is answering, and how it prepares data (sensors, window, features) |
+| `POST /predict` | an engine's **raw** readings in -> remaining useful life out, plus the model version and any warnings |
+
+At startup the service fetches `rul-fd001@champion` from MLflow -- the model and
+its `feature_stats.json` as a matched pair, by version number. It loads once;
+a promotion is picked up on the next restart, and every response names the
+version that answered.
+
+### No training/serving skew
+
+The model needs 46 prepared features, not raw readings. The service prepares
+them with the **same code** (`src/features/engineering.py`) and the **champion's
+own numbers** -- there is no second copy of the feature logic. A test sends all
+100 test engines' raw readings through the web service and requires the same
+answers as the offline pipeline `evaluate.py` uses. Deliberately breaking one
+number -- a smoothing window of 4 instead of 5 -- changes every one of the 100
+answers, by up to 21 cycles, and the test fails.
+
+### Requests are checked in layers
+
+| Layer | Problem | Response |
+|---|---|---|
+| shape | missing or misspelled field, text instead of a number | refused, 422 |
+| history | a gap, a repeat, wrong order, or fewer than the last 5 cycles (unless starting at cycle 1) | refused, 422 -- the features would be silently wrong |
+| values | a reading outside the validation contract | **answered, with a warning** |
+
+Too little history matters: with only the last 3 cycles, test engine 1 gets
+124.46 instead of 123.96, with no error. Unusual values are answered rather
+than refused because an engine near failure may be exactly such an engine; the
+warning says plainly that the reading is outside what the model learned from.
+A changed `sensor_1` does not move the prediction at all -- the model never
+sees that sensor -- so the warning is the only sign that something changed.
+
 ## Notes for later stages
 
 * **Ingestion is intentionally lossless.** RUL labels and features are computed
@@ -566,10 +617,17 @@ up to date" while pushing nothing. A test now asks DVC directly.
   `engine_folds()` exists for this.
 * **The forest is still slightly optimistic near failure** (+6.4 cycles on
   validation, +5.4 on test). The direction to improve.
-* **The stored model does not include the clip-at-zero rule, or its scaling.**
-  Those live in `predict_rul()` and in the run's `feature_stats.json`. Serving
-  must apply both exactly as `evaluate.py` does -- the skew check there is the
-  pattern to follow.
+* **The service runs on this machine only.** Putting it in a Docker container
+  next to MLflow (its own Dockerfile; inside Docker it reaches MLflow at a
+  different address) is the next step.
+* **A promotion needs a service restart.** The service loads the champion once.
+  A reload endpoint, or a periodic check of the alias, would pick up promotions
+  without one.
+* **Warnings are returned, not yet collected.** They are a ready-made drift
+  signal; monitoring should record them over time.
+* **About 0.1-0.2 s per prediction**, mostly the forest spreading 200 trees
+  over every CPU core (`n_jobs: -1`) for a single engine. Fine for occasional
+  requests; tune if throughput ever matters.
 * **Commit before training runs you want to reproduce.** Runs now record
   `git.uncommitted_changes`, and promotion warns about it, but a run trained from
   uncommitted code still cannot be rebuilt from its commit.
