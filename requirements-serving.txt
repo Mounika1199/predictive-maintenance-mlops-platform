@@ -1,0 +1,19 @@
+# Packages for the prediction service's Docker image ONLY (see Dockerfile).
+#
+# The full requirements.txt also holds DVC (73 packages), pytest and test tools
+# -- none of which the running service uses. Leaving them out makes the image
+# smaller, faster to build, and gives less that could break or be exploited.
+#
+# Every version here MUST match requirements.txt: the service has to run the
+# same library versions the model was trained and tested with. A test
+# (tests/test_container.py) fails if the two lists ever disagree.
+
+pandas==2.2.3          # tables
+numpy==1.26.4          # numbers under pandas
+PyYAML==6.0.2          # reads configs/*.yaml
+pandera==0.33.1        # the validation contract (warnings on unusual readings)
+scikit-learn==1.9.1    # the model itself
+mlflow-skinny==3.17.1  # fetches the champion from the registry
+skops==0.16.0          # opens the model file safely
+fastapi==0.143.0       # the web service
+uvicorn==0.54.0        # runs it

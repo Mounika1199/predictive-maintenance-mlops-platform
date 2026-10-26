@@ -1,14 +1,20 @@
 # ---------------------------------------------------------------------------
-# The MLflow tracking server, running inside a Docker container.
+# Two containers:
+#   mlflow       the MLflow tracking server and model registry
+#   rul-service  our prediction service (built from ./Dockerfile)
 #
-#   Start:      docker compose up -d            (-d = run in the background)
+#   Start:      docker compose up -d --build    (-d = in the background;
+#                                                --build = rebuild our image
+#                                                if the code changed)
 #   Status:     docker compose ps
-#   Logs:       docker compose logs -f mlflow
+#   Logs:       docker compose logs -f rul-service      (or: mlflow)
 #   Stop:       docker compose down             (your experiment history is kept)
-#   Web page:   http://localhost:5000
+#   MLflow:     http://localhost:5000
+
 #
-# Our project is only a CLIENT: scripts/train.py sends its results here over
-# the network. The server software lives in this container, not in mlops_env.
+# Inside Docker, each container has its OWN "localhost". Compose puts both on a
+# private network where each is reachable by its service NAME -- so the
+# service finds MLflow at http://mlflow:5000, not http://localhost:5000.
 #
 # (Older tutorials call this file docker-compose.yml. compose.yaml is the
 # current standard name; Docker accepts both.)
@@ -31,12 +37,21 @@ services:
     #   --artifacts-destination   where files go (saved models, etc.). The
     #                    server receives them over HTTP, so our project never
     #                    needs to touch this folder directly.
+    #   --allowed-hosts  which names visitors may address the server by. By
+    #                    default only localhost and private IP addresses: a
+    #                    protection against "DNS rebinding" (tricking a browser
+    #                    into reaching services on your machine). Our service
+    #                    addresses it as mlflow:5000, which was refused with 403
+    #                    -- while /health still said OK. Exactly one trusted
+    #                    name is added; never "*". Setting this REPLACES the
+    #                    defaults, so localhost and 127.0.0.1 are listed too.
     command: >
       mlflow server
       --host 0.0.0.0
       --port 5000
       --backend-store-uri sqlite:////mlflow/mlflow.db
       --artifacts-destination /mlflow/artifacts
+      --allowed-hosts localhost:*,127.0.0.1:*,mlflow:5000
 
     # "Windows port : container port". 127.0.0.1 means only THIS computer can
     # reach it. That matters: the MLflow server has no login, so it must not be
@@ -56,7 +71,41 @@ services:
     environment:
       MLFLOW_DISABLE_TELEMETRY: "true"
 
+    # "Are you ready?" -- every 10 s, ask the server's /health page. The
+    # prediction service waits for "healthy" before starting (see below).
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/health', timeout=4)"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+
     # Start again automatically when Docker starts, unless you stopped it.
+    restart: unless-stopped
+
+  rul-service:
+    # Our own image, built from ./Dockerfile (with ./.dockerignore deciding
+    # what Docker may see).
+    build: .
+    image: rul-service:1.0.0
+    container_name: rul-service
+
+    # Where to find MLflow -- by its service name on the compose network. The
+    # MLFLOW_TRACKING_URI setting wins over configs/training.yaml's localhost
+    # address (see resolve_tracking_uri in src/models/tracking.py).
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+
+    # Like MLflow: reachable only from this computer. The service has no login.
+    ports:
+      - "127.0.0.1:8000:8000"
+
+    # The service fetches the champion at startup, so MLflow must be READY --
+    # not merely started.
+    depends_on:
+      mlflow:
+        condition: service_healthy
+
     restart: unless-stopped
 
 volumes:

@@ -1,0 +1,21 @@
+# ---------------------------------------------------------------------------
+# What Docker may see when building the service image.
+#
+# Docker sends the whole build folder -- the project -- to the engine before
+# building. Without this file that would include mlops_env/ (gigabytes),
+# data/, .git/, and .dvc/config.local, which holds a local path with the
+# Windows username.
+#
+# So this is an ALLOW-LIST: ignore everything ("*"), then let back in only
+# what the service needs. Anything new added to the project later stays out
+# by default -- the safe direction to fail in.
+# ---------------------------------------------------------------------------
+*
+
+!requirements-serving.txt
+!configs/
+!src/
+
+# ...but never Python's cache files, even inside src/
+**/__pycache__
+**/*.pyc

@@ -18,7 +18,7 @@ This repository is built incrementally, one stage at a time.
 | Model evaluation | Done (first version) |
 | Experiment tracking (MLflow) | Done (server in Docker) |
 | Model registry | Done (champion/challenger, gated promotion) |
-| Model serving | Done (FastAPI, run locally; Docker next) |
+| Model serving | Done (FastAPI, in Docker next to MLflow) |
 | Monitoring & drift detection | Not started |
 | Retraining | Not started |
 
@@ -29,11 +29,12 @@ python -m venv mlops_env
 .\mlops_env\Scripts\Activate.ps1
 pip install -r requirements.txt
 dvc pull                      # fetch the data from DVC storage (see below)
-docker compose up -d          # start the MLflow server (needs Docker Desktop)
+docker compose up -d --build  # start MLflow and the prediction service (needs Docker Desktop)
 setx MLFLOW_DISABLE_TELEMETRY true   # once per machine; see the telemetry note
 ```
 
-The MLflow server runs in a Docker container; see *Experiment tracking* below.
+The MLflow server and the prediction service run in Docker containers; see
+*Experiment tracking* and *Model serving* below.
 
 The dataset is **not** in Git. Git holds only the pointer file `data/raw.dvc`;
 `dvc pull` fetches the files themselves from DVC storage (see *Data versioning*).
@@ -57,12 +58,12 @@ environment variable above (it takes effect in newly opened terminals).
 ```powershell
 dvc repro                                   # validate -> ingest -> build_features (only what's out of date)
 python scripts/build_reference_profile.py   # regenerate the validation contract (rarely)
-docker compose up -d                        # MLflow server must be running for train.py
+docker compose up -d --build                # MLflow (needed by train.py) + the prediction service
 python scripts/train.py                     # train, compare on validation, record in MLflow
 python scripts/promote_model.py             # put the challenger into use, if it is better
+docker compose restart rul-service          # the service picks up the new champion
 python scripts/evaluate.py                  # score the champion on the test set
 python scripts/experiment_cycle_feature.py  # 5-fold experiment: does `cycle` help?
-uvicorn src.serving.app:app --port 8000     # the prediction service; docs at http://127.0.0.1:8000/docs
 pytest                                       # run the test suite (no Docker needed)
 ```
 
@@ -74,7 +75,10 @@ pipeline is out of date.
 ## Project layout
 
 ```
-compose.yaml                       The MLflow server, run as a Docker container
+compose.yaml                       The two containers: MLflow server, prediction service
+Dockerfile                         How the prediction service's image is built
+.dockerignore                      What the image may contain (an allow-list)
+requirements-serving.txt           The image's packages: a subset of requirements.txt
 dvc.yaml                           The data pipeline: validate -> ingest -> build_features
 dvc.lock                           The pipeline's receipt: fingerprints of every input/output
 .dvc/config                        DVC settings: analytics off (storage path: config.local)
@@ -557,8 +561,16 @@ A small web service (FastAPI, run by uvicorn) answers "here are this engine's
 readings -- how long has it got?" for other systems.
 
 ```powershell
-docker compose up -d                          # MLflow must be running
-uvicorn src.serving.app:app --port 8000       # then open http://127.0.0.1:8000/docs
+docker compose up -d --build    # build the service's image; start MLflow, then the service
+docker compose ps               # both should say "healthy"
+```
+
+Then open http://127.0.0.1:8000/docs to try it. To run the service straight
+from your code instead (while developing), free its port first:
+
+```powershell
+docker compose stop rul-service
+uvicorn src.serving.app:app --port 8000
 ```
 
 | Address | Purpose |
@@ -597,6 +609,63 @@ warning says plainly that the reading is outside what the model learned from.
 A changed `sensor_1` does not move the prediction at all -- the model never
 sees that sensor -- so the warning is the only sign that something changed.
 
+### The service runs in Docker
+
+```
+WINDOWS                                 DOCKER (a private network)
+browser, other systems
+   -- http://127.0.0.1:8000 -->   rul-service  -- http://mlflow:5000 -->  mlflow
+your scripts (train.py, ...)
+   -- http://localhost:5000 ---------------------------------------->  mlflow
+```
+
+* **The image** (`rul-service:1.0.0`) is built by the `Dockerfile` on an exact
+  Python (3.11.17, slim). Packages are installed *before* the code is copied in,
+  so editing code rebuilds in seconds (Docker reuses unchanged steps). It runs
+  as an ordinary user, not root, and has a health check.
+* **Only what the service needs goes in.** `.dockerignore` is an allow-list:
+  `src/`, `configs/` and `requirements-serving.txt`, nothing else (85 KB sent to
+  Docker). `mlops_env/`, `data/`, `.git/` and `.dvc/config.local` -- which holds a
+  local path with the Windows username -- never reach the image.
+  `requirements-serving.txt` leaves out DVC and the test tools; its versions must
+  equal `requirements.txt`'s, so the service runs the libraries the model was
+  trained with.
+* **Inside Docker, `localhost` means the container itself.** The service finds
+  MLflow by its service name, `http://mlflow:5000`, set by the
+  `MLFLOW_TRACKING_URI` variable in `compose.yaml` (it wins over
+  `configs/training.yaml`).
+* **Startup order:** the service waits until MLflow is *healthy*, not just
+  started -- it fetches the champion at startup.
+* **Both ports are bound to `127.0.0.1`:** neither service has a login.
+
+Checked: all 100 test engines' raw readings sent to the container (Linux) give
+the same answers as the offline pipeline on Windows -- largest difference
+4.3e-14 cycles. `tests/test_container.py` reads the Docker files (no Docker
+needed) and fails if any decision above is undone; each check was tested by
+breaking that decision on purpose.
+
+### Two traps we hit
+
+**A passing health check is not proof.** MLflow answered the service's `/health`
+check with OK, but refused every real request with 403 *"Invalid Host header --
+possible DNS rebinding attack detected"*. MLflow only answers requests addressed
+to names it trusts (by default localhost and private IP addresses). This stops
+**DNS rebinding**: a web page tricking your browser into talking to servers on
+your own computer. The service addresses it as `mlflow:5000`, so exactly that
+name was added to `--allowed-hosts` -- never `*`, which would switch the
+protection off. Setting the list replaces the defaults, so localhost is listed
+too.
+
+**"Port is not available" on Windows.** A service started earlier with `uvicorn`
+had been stopped, yet port 8000 was still taken. The venv's `python.exe` is a
+small launcher that starts the real Python as a *separate* process; stopping the
+launcher can leave the real one running. Find it, then stop that process:
+
+```powershell
+Get-CimInstance Win32_Process | Where-Object CommandLine -like "*uvicorn src.serving.app:app*" |
+    Select-Object ProcessId, CommandLine
+```
+
 ## Notes for later stages
 
 * **Ingestion is intentionally lossless.** RUL labels and features are computed
@@ -617,12 +686,14 @@ sees that sensor -- so the warning is the only sign that something changed.
   `engine_folds()` exists for this.
 * **The forest is still slightly optimistic near failure** (+6.4 cycles on
   validation, +5.4 on test). The direction to improve.
-* **The service runs on this machine only.** Putting it in a Docker container
-  next to MLflow (its own Dockerfile; inside Docker it reaches MLflow at a
-  different address) is the next step.
-* **A promotion needs a service restart.** The service loads the champion once.
-  A reload endpoint, or a periodic check of the alias, would pick up promotions
-  without one.
+* **The service has no login.** That is why it is reachable from this computer
+  only. Before it is opened to other machines, it needs authentication and HTTPS.
+* **The image tag (`1.0.0`) is set by hand.** An automated build (CI) would tag
+  each image with its Git commit, so a running container traces back to its code
+  the way a model version traces back to its run.
+* **A promotion needs a service restart** (`docker compose restart rul-service`).
+  The service loads the champion once. A reload endpoint, or a periodic check of
+  the alias, would pick up promotions without one.
 * **Warnings are returned, not yet collected.** They are a ready-made drift
   signal; monitoring should record them over time.
 * **About 0.1-0.2 s per prediction**, mostly the forest spreading 200 trees
