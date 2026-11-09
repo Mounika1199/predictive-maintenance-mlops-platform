@@ -1,0 +1,23 @@
+# ---------------------------------------------------------------------------
+# Grafana dashboard provider: load our dashboards from files ("as code").
+#
+# compose.yaml places monitoring/grafana/dashboards/ at /etc/grafana/dashboards
+# inside the container; every dashboard JSON there is loaded at start-up.
+# ---------------------------------------------------------------------------
+
+apiVersion: 1
+
+providers:
+  - name: rul-dashboards
+    # The folder the dashboards appear in, inside Grafana.
+    folder: RUL service
+    type: file
+    # Re-read the folder every 30 s: an edited JSON appears without a restart.
+    updateIntervalSeconds: 30
+    # The FILE is the source of truth. Changes made by clicking cannot be saved
+    # over it (experiment freely, or "Save as" a personal copy), and it cannot
+    # be deleted in the web page.
+    allowUiUpdates: false
+    disableDeletion: true
+    options:
+      path: /etc/grafana/dashboards

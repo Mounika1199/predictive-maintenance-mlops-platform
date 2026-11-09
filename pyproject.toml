@@ -4,3 +4,7 @@
 # to pip-install the project. Keeps test files clean.
 pythonpath = ["."]
 testpaths = ["tests"]
+# Evidently imports litestar (the web server of its optional dashboard, which
+# we do not use), and litestar warns about its OWN internal code. Hidden for
+# that package only: warnings from our code or any other library still show.
+filterwarnings = ["ignore::DeprecationWarning:litestar"]

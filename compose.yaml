@@ -10,6 +10,10 @@
 #   Logs:       docker compose logs -f rul-service      (or: mlflow)
 #   Stop:       docker compose down             (your experiment history is kept)
 #   MLflow:     http://localhost:5000
+#   Service:    http://127.0.0.1:8000/docs
+#   Diary:      logs/predictions/  (every prediction the service makes)
+#   Prometheus: http://127.0.0.1:9090  (the service's health numbers over time)
+#   Grafana:    http://127.0.0.1:3000  (dashboards; user "admin", password in .env)
 
 #
 # Inside Docker, each container has its OWN "localhost". Compose puts both on a
@@ -100,6 +104,14 @@ services:
     ports:
       - "127.0.0.1:8000:8000"
 
+    # The diary of predictions (configs/monitoring.yaml). "./logs:/app/logs"
+    # is a BIND MOUNT: the container's /app/logs folder IS this project's
+    # logs/ folder on Windows. Unlike MLflow's volume, which only Docker can
+    # see into, these files can be opened in VS Code and read by our scripts.
+    # logs/ is git-ignored and never copied into the image.
+    volumes:
+      - ./logs:/app/logs
+
     # The service fetches the champion at startup, so MLflow must be READY --
     # not merely started.
     depends_on:
@@ -108,5 +120,82 @@ services:
 
     restart: unless-stopped
 
+  prometheus:
+    # Collects the service's health numbers (its /metrics page) every few
+    # seconds and keeps their history. Official image, pinned like MLflow.
+    image: prom/prometheus:v3.15.1
+    container_name: prometheus
+
+    volumes:
+      # Its settings: what to collect, how often. ":ro" = read-only -- the
+      # container may read our file but never change it.
+      - ./monitoring/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      # The collected history, kept by Docker (like MLflow's data): survives
+      # restarts and `docker compose down`. Prometheus keeps 15 days by default.
+      - prometheus_data:/prometheus
+
+    # Like the others: reachable only from this computer. Prometheus has no login.
+    ports:
+      - "127.0.0.1:9090:9090"
+
+    # "Are you ready?" -- Prometheus's own health page, asked with wget (a
+    # small download tool included in the image).
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:9090/-/healthy"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+    restart: unless-stopped
+
+  grafana:
+    # Dashboards on top of Prometheus. Stores no measurements itself: every
+    # panel asks Prometheus a PromQL question. Official image, pinned.
+    image: grafana/grafana:13.2.4
+    container_name: grafana
+
+    environment:
+      # The admin login. The password comes from the local, git-ignored .env
+      # file -- never written here, because this repository is public.
+      # ":?" = refuse to start if it is missing, instead of an empty password.
+      # NOTE: Grafana uses it only on its FIRST start, when it creates the
+      # admin user in its storage; changing .env later does not change it.
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?set GRAFANA_ADMIN_PASSWORD in the .env file}
+      # Nothing leaves this machine (Grafana's defaults, from its defaults.ini):
+      GF_ANALYTICS_REPORTING_ENABLED: "false"         # usage counters to stats.grafana.org
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"         # asking grafana.com for new versions
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"  # ... and new plugin versions
+      GF_NEWS_NEWS_FEED_ENABLED: "false"              # news feed loaded from grafana.com
+      GF_SNAPSHOTS_EXTERNAL_ENABLED: "false"          # "publish snapshot" to an outside site
+
+    volumes:
+      # Our set-up files, read-only: the data source and the dashboard provider
+      # (Grafana's provisioning folder, GF_PATHS_PROVISIONING in the image) ...
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      # ... and the dashboards themselves (the path in dashboards.yml).
+      - ./monitoring/grafana/dashboards:/etc/grafana/dashboards:ro
+      # Grafana's own storage (users, preferences), kept by Docker.
+      - grafana_data:/var/lib/grafana
+
+    # Like the others: reachable only from this computer.
+    ports:
+      - "127.0.0.1:3000:3000"
+
+    # Its panels need Prometheus, so start once Prometheus is ready.
+    depends_on:
+      prometheus:
+        condition: service_healthy
+
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://localhost:3000/api/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+
+    restart: unless-stopped
+
 volumes:
   mlflow_data:
+  prometheus_data:
+  grafana_data:

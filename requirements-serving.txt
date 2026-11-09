@@ -17,3 +17,4 @@ mlflow-skinny==3.17.1  # fetches the champion from the registry
 skops==0.16.0          # opens the model file safely
 fastapi==0.143.0       # the web service
 uvicorn==0.54.0        # runs it
+prometheus-client==0.26.0  # the /metrics page Prometheus reads

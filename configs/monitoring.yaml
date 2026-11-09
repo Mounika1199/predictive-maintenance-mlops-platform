@@ -1,0 +1,41 @@
+# ---------------------------------------------------------------------------
+# Monitoring settings: watching the model after it goes live.
+# ---------------------------------------------------------------------------
+
+prediction_log:
+  # Where the service keeps its diary: one JSON Lines file per day (UTC),
+  # e.g. logs/predictions/predictions-2026-10-27.jsonl.
+  #
+  # Relative to the project root. Inside the container the project root is
+  # /app, and compose.yaml shares /app/logs with this project's logs/ folder --
+  # so the service in Docker and the service run by hand write to the same place.
+  directory: logs/predictions
+
+drift:
+  # Every number below was MEASURED on our own data (see the README), with
+  # the 100 test engines as a normal fleet and sensor_11 reading +0.134 (half
+  # its usual spread) as a broken sensor.
+
+  # Compare like with like: on BOTH sides, only readings taken at engine ages
+  # 1..max_cycle. Readings change as engines wear -- that is what the model
+  # reads, not a fault. Comparing all ages raised false alarms on a normal
+  # fleet (it was simply younger) and hid the broken sensor. Beyond cycle 100,
+  # old training engines are near failure while old fleet engines are the
+  # long-lived survivors, so even same-age comparison fails there.
+  max_cycle: 100
+
+  # PSI, not Evidently's default (Wasserstein distance). Wasserstein flagged
+  # 13 of 15 sensors on the NORMAL fleet: different engines naturally differ
+  # by more than its strict line. PSI: normal fleet highest 0.043, broken
+  # sensor 0.446 -- and only that sensor.
+  method: psi
+
+  # A sensor has drifted when its score is at least this (Evidently's PSI default).
+  threshold: 0.1
+
+  # Fewer readings than this: no verdict. With 100 or 300 readings, chance
+  # alone raised a false alarm in 10 of 10 samples; with 1,000, in 0 of 10.
+  min_readings: 1000
+
+  # Where the HTML reports go (git-ignored). Each is about 4.6 MB.
+  report_dir: reports

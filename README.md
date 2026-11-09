@@ -19,7 +19,7 @@ This repository is built incrementally, one stage at a time.
 | Experiment tracking (MLflow) | Done (server in Docker) |
 | Model registry | Done (champion/challenger, gated promotion) |
 | Model serving | Done (FastAPI, in Docker next to MLflow) |
-| Monitoring & drift detection | Not started |
+| Monitoring & drift detection | Done (prediction diary, drift check with Evidently, Prometheus + Grafana); accuracy against late-arriving truth not yet |
 | Retraining | Not started |
 
 ## Setup
@@ -29,12 +29,17 @@ python -m venv mlops_env
 .\mlops_env\Scripts\Activate.ps1
 pip install -r requirements.txt
 dvc pull                      # fetch the data from DVC storage (see below)
-docker compose up -d --build  # start MLflow and the prediction service (needs Docker Desktop)
+# once: a random Grafana admin password into .env (git-ignored, never committed)
+python -c "import secrets, pathlib; pathlib.Path('.env').write_text('GRAFANA_ADMIN_PASSWORD=' + secrets.token_urlsafe(24) + '\n')"
+docker compose up -d --build  # MLflow, the prediction service, Prometheus, Grafana (needs Docker Desktop)
 setx MLFLOW_DISABLE_TELEMETRY true   # once per machine; see the telemetry note
 ```
 
-The MLflow server and the prediction service run in Docker containers; see
-*Experiment tracking* and *Model serving* below.
+MLflow, the prediction service, Prometheus and Grafana run in Docker
+containers; see *Experiment tracking*, *Model serving* and *Monitoring* below.
+The `.env` line is written by Python rather than PowerShell's `>`, which would
+save it in an encoding Docker Compose cannot read; Compose refuses to start
+Grafana without that password.
 
 The dataset is **not** in Git. Git holds only the pointer file `data/raw.dvc`;
 `dvc pull` fetches the files themselves from DVC storage (see *Data versioning*).
@@ -48,24 +53,31 @@ dvc remote add --local -d localstore <folder>   # e.g. a folder outside the proj
 
 Or place the three FD001 files in `data/raw/` by hand.
 
-**Telemetry.** DVC and MLflow both send anonymous usage statistics by default.
-Both are switched off: DVC in `.dvc/config`, the MLflow server in
-`compose.yaml`, and the MLflow client by the `MLFLOW_DISABLE_TELEMETRY`
-environment variable above (it takes effect in newly opened terminals).
+**Telemetry.** DVC, MLflow and Grafana all send anonymous usage statistics by
+default. All are switched off: DVC in `.dvc/config`, the MLflow server and
+Grafana in `compose.yaml` (Grafana's update checks, news feed and external
+snapshot sharing too -- confirmed in its live settings), and the MLflow client
+by the `MLFLOW_DISABLE_TELEMETRY` environment variable above (it takes effect
+in newly opened terminals). Prometheus sends nothing.
 
 ## Usage
 
 ```powershell
 dvc repro                                   # validate -> ingest -> build_features (only what's out of date)
 python scripts/build_reference_profile.py   # regenerate the validation contract (rarely)
-docker compose up -d --build                # MLflow (needed by train.py) + the prediction service
+docker compose up -d --build                # MLflow (needed by train.py), the service, Prometheus, Grafana
 python scripts/train.py                     # train, compare on validation, record in MLflow
 python scripts/promote_model.py             # put the challenger into use, if it is better
 docker compose restart rul-service          # the service picks up the new champion
 python scripts/evaluate.py                  # score the champion on the test set
 python scripts/experiment_cycle_feature.py  # 5-fold experiment: does `cycle` help?
+python scripts/simulate_traffic.py --engines 10   # pretend fleet -> the service (all 100: drop --engines)
+python scripts/check_drift.py --since <UTC time>  # has the data drifted? exit 0 / 1 drift / 2 too little
 pytest                                       # run the test suite (no Docker needed)
 ```
+
+Dashboards: Grafana at http://127.0.0.1:3000 (user `admin`, password in
+`.env`), Prometheus at http://127.0.0.1:9090. See *Monitoring*.
 
 `dvc repro` runs the data scripts (`validate_fd001.py`, `ingest_fd001.py`,
 `build_features.py`) in order, and only those whose inputs changed. It calls
@@ -75,10 +87,17 @@ pipeline is out of date.
 ## Project layout
 
 ```
-compose.yaml                       The two containers: MLflow server, prediction service
+compose.yaml                       The four containers: MLflow, prediction service, Prometheus, Grafana
 Dockerfile                         How the prediction service's image is built
 .dockerignore                      What the image may contain (an allow-list)
 requirements-serving.txt           The image's packages: a subset of requirements.txt
+.env                               Local secrets (Grafana password)  (git-ignored, never committed)
+configs/monitoring.yaml            Diary folder; drift rules, each with its measured reason
+monitoring/prometheus/prometheus.yml   What Prometheus collects, how often
+monitoring/grafana/provisioning/   Grafana set-up as code: data source, dashboard loader
+monitoring/grafana/dashboards/     The dashboard, as JSON
+logs/predictions/                  The service's diary, one file per day  (git-ignored)
+reports/                           Drift reports, HTML                    (git-ignored)
 dvc.yaml                           The data pipeline: validate -> ingest -> build_features
 dvc.lock                           The pipeline's receipt: fingerprints of every input/output
 .dvc/config                        DVC settings: analytics off (storage path: config.local)
@@ -103,7 +122,11 @@ src/models/promotion.py            The rules for promoting a model to champion
 src/serving/predictor.py           Raw readings -> features -> prediction (reuses src/features)
 src/serving/checks.py              Request checks: history (refuse), contract (warn)
 src/serving/schemas.py             Request/response shapes, checked by FastAPI
-src/serving/app.py                 The web service: /health, /model, /predict
+src/serving/app.py                 The web service: /health, /model, /predict, /metrics
+src/monitoring/prediction_log.py   The diary: write one line per prediction, read it back
+src/monitoring/traffic.py          The pretend fleet: which request comes next, a broken sensor
+src/monitoring/drift.py            The drift rules: what to compare, Evidently, the verdict
+src/monitoring/metrics.py          The service's numbers for Prometheus
 scripts/ingest_fd001.py            Entry point: loads raw, writes Parquet
 scripts/build_reference_profile.py Entry point: writes the reference profile
 scripts/validate_fd001.py          Entry point: validates, writes the gate report, exit 1 on failure
@@ -112,6 +135,8 @@ scripts/train.py                   Entry point: train, select on validation, reg
 scripts/promote_model.py           Entry point: move the champion tag, after checks
 scripts/evaluate.py                Entry point: score the champion on test
 scripts/experiment_cycle_feature.py Experiment: cycle feature, 5-fold CV by engine
+scripts/simulate_traffic.py        Entry point: replay the test engines into the service
+scripts/check_drift.py             Entry point: diary vs training data, HTML report, exit code
 tests/                             Pytest suite (shared setup in conftest.py)
 ```
 
@@ -561,8 +586,8 @@ A small web service (FastAPI, run by uvicorn) answers "here are this engine's
 readings -- how long has it got?" for other systems.
 
 ```powershell
-docker compose up -d --build    # build the service's image; start MLflow, then the service
-docker compose ps               # both should say "healthy"
+docker compose up -d --build    # build the service's image; start MLflow, then the service (and monitoring)
+docker compose ps               # every container should say "healthy"
 ```
 
 Then open http://127.0.0.1:8000/docs to try it. To run the service straight
@@ -578,6 +603,7 @@ uvicorn src.serving.app:app --port 8000
 | `GET /health` | "are you alive?" -- for monitoring tools |
 | `GET /model` | which version is answering, and how it prepares data (sensors, window, features) |
 | `POST /predict` | an engine's **raw** readings in -> remaining useful life out, plus the model version and any warnings |
+| `GET /metrics` | request counts, response times and more, read by Prometheus (see *Monitoring*) |
 
 At startup the service fetches `rul-fd001@champion` from MLflow -- the model and
 its `feature_stats.json` as a matched pair, by version number. It loads once;
@@ -666,6 +692,144 @@ Get-CimInstance Win32_Process | Where-Object CommandLine -like "*uvicorn src.ser
     Select-Object ProcessId, CommandLine
 ```
 
+## Monitoring
+
+A model in production never says "I don't know": if the world changes, it keeps
+answering, confidently and wrongly, and nothing crashes. Monitoring watches two
+things:
+
+| Watches | Question | How |
+|---|---|---|
+| the **data** | Do incoming readings still look like the training data? | the diary + a drift check (Evidently) |
+| the **service** | Is it up? How busy, how fast, how often does it refuse? | Prometheus collects numbers, Grafana draws them |
+
+```
+requests ──> rul-service ──> answers
+               │      │
+  counts,      │      │ every answered prediction
+  timings      ▼      ▼
+         Prometheus   diary (logs/predictions/) ──> scripts/check_drift.py ──> verdict + HTML report
+               │
+               ▼
+            Grafana (dashboard)
+```
+
+### The diary (prediction log)
+
+Every answered `/predict` adds one line of JSON to `logs/predictions/
+predictions-<day>.jsonl`: the time, the engine, the **newest** cycle's readings,
+the answer, the model version and any warnings.
+
+* **Newest cycle only.** A request carries the last 5 cycles (the rolling
+  features need them); writing all of them would record each cycle five times.
+* **Refused requests are not written** -- no prediction was made.
+* **A failed write never fails the prediction**: the service still answers and
+  logs a warning (and counts it, see Prometheus below).
+* **A lock around each write.** Requests are answered in parallel threads;
+  without it, 40 of 400 lines written at once were silently lost on Windows, in
+  5 runs out of 5.
+* `logs/` is a **bind mount**: the container's `/app/logs` is the project's
+  `logs/` folder, so the files open in VS Code. Git-ignored, never in the image.
+* Read with `json.loads`, not `pd.read_json`, which turns an engine id `"007"`
+  into the number 7.
+
+### A pretend fleet: the traffic simulator
+
+We have no real engines, so `scripts/simulate_traffic.py` replays the 100 test
+engines into the service the way a fleet would: day by day, every engine flies
+once and sends its last 5 cycles -- 13,096 requests, one per recorded cycle,
+sent one at a time. `--engines 10` makes a quick run (1,088 requests).
+
+`--broken-sensor sensor_11` adds half that sensor's usual spread (+0.134) to
+every reading, like a badly recalibrated sensor. Every faulty reading stayed
+inside the training range, so the service's warnings stayed silent (0 of
+13,096) -- yet 75% of the answers went down, by up to 19.7 cycles. Only a drift
+check can find this kind of fault.
+
+### Data drift: `scripts/check_drift.py`
+
+Compares the diary's readings with the champion's training readings, sensor by
+sensor, using Evidently, and saves an HTML report with a chart per sensor in
+`reports/`. Exit code 0 = no drift, 1 = drift, 2 = too few readings to judge --
+so a scheduler or a retraining job can react.
+
+Evidently does the comparing; **the rules are ours**, and each was measured on
+our own data (normal fleet = the test engines; fault = the broken sensor):
+
+| Rule | Why (measured) |
+|---|---|
+| Compare only engine ages **1-100**, on both sides | Readings change as engines wear -- that is what the model reads. The test fleet is younger than the training engines, so comparing all ages flagged 7 of 15 sensors on a normal fleet, and *hid* the broken sensor (its score went down). Beyond cycle 100, old training engines are near failure while old fleet engines are long-lived survivors, so even same-age comparison fails there |
+| **PSI**, not Evidently's default (Wasserstein) | Wasserstein flagged 13 of 15 sensors on the normal fleet -- even engines of exactly the same ages differ by more than its strict line. PSI: normal fleet highest 0.043, broken sensor 0.446 |
+| A sensor drifts at **score >= 0.1** | Evidently's PSI default; a wide margin on both sides |
+| Drift if **any one** sensor drifts | Evidently's own verdict needs half the columns; one broken sensor of 15 would have been "no drift" |
+| At least **1,000 readings** | With 100 or 300, chance alone raised a false alarm in 10 of 10 samples; with 1,000, in 0 of 10 |
+
+On the full runs: normal fleet -> no drift (exit 0); broken sensor -> drift on
+`sensor_11`, and only that sensor (exit 1); 47 seconds of traffic -> no verdict
+(exit 2). (Evidently's PSI cuts the range into equal-width bins -- about 15 here
+-- not quantiles. Its optional dashboard server, litestar, warns about its own
+code; `pyproject.toml` hides those warnings, and only those.)
+
+### Service health: Prometheus
+
+The service offers `GET /metrics` (`src/monitoring/metrics.py`); Prometheus
+reads it every 5 seconds and keeps the history (http://127.0.0.1:9090).
+
+| Metric | Kind | Answers |
+|---|---|---|
+| `rul_http_requests_total` (method, route, status) | counter | requests per second; how many refused (422) |
+| `rul_http_request_duration_seconds` (route) | histogram | how fast: median, 95% |
+| `rul_predictions_with_warnings_total` | counter | are unusual readings becoming common? |
+| `rul_prediction_log_failures_total` | counter | is the diary failing to save? |
+| `rul_model_info` (model_name, model_version) | gauge | which model is answering |
+
+* A **middleware** times and counts every request; counting happens in
+  `finally`, so even a crash is counted (as 500).
+* Requests are labelled by **route, never the raw address**: a thousand random
+  URLs share one `unmatched` label instead of becoming a thousand counters.
+* Each app has its **own registry**, so the tests -- which build many apps --
+  each start from zero.
+* Rates and increases are **estimates** (Prometheus only has a reading every
+  5 s); a counter itself is exact. A run of 1,088 requests showed as 1,082 over
+  its window, while the counter said 1,088.
+
+Example (Prometheus's Graph tab): `rate(rul_http_requests_total{route="/predict"}[1m])`
+-- requests per second, averaged over the minute before each moment.
+
+### The dashboard: Grafana
+
+http://127.0.0.1:3000/d/rul-service -- user `admin`, password in `.env`. Six
+panels: service reachable, model answering, requests per second, response time
+(median and 95%), refused requests (%), warnings and diary failures.
+
+* **Set up as code.** The data source and the dashboard are files in
+  `monitoring/grafana/`, loaded at start-up (`provisioning`): in Git, and
+  rebuilt identically anywhere. The file is the source of truth: changes made by
+  clicking cannot be saved over it ("Save as" makes a personal copy).
+* **No password in Git.** `compose.yaml` reads it from `.env` with
+  `${GRAFANA_ADMIN_PASSWORD:?...}` -- Compose refuses to start Grafana without
+  one, instead of falling back to `admin`/`admin`. Grafana uses it only on its
+  first start, when it creates the admin user.
+* **Nothing leaves the machine**: usage reporting, update checks, the news feed
+  and external snapshot sharing are off -- confirmed in Grafana's live settings
+  (`/api/admin/settings`), not just in the file.
+
+### Monitoring found a real problem: the slow model
+
+The response-time panel showed ~90 ms per prediction. The forest kept its
+training setting -- use every core (`n_jobs: -1`) -- and for ONE row, starting
+and coordinating 12 workers costs more than asking 200 trees. The service now
+switches its loaded copy to one core (`use_one_core()` in
+`src/serving/predictor.py`); training still uses every core, and the
+registered model is untouched. The same traffic before and after:
+
+| | All 12 cores | One core |
+|---|---|---|
+| average per prediction | 91 ms | **55 ms** |
+| 95% answered within | 206 ms | **74 ms** |
+| requests per second | 10.1 | **15.0** |
+| answers | | identical within 4.3e-14 cycles |
+
 ## Notes for later stages
 
 * **Ingestion is intentionally lossless.** RUL labels and features are computed
@@ -694,11 +858,35 @@ Get-CimInstance Win32_Process | Where-Object CommandLine -like "*uvicorn src.ser
 * **A promotion needs a service restart** (`docker compose restart rul-service`).
   The service loads the champion once. A reload endpoint, or a periodic check of
   the alias, would pick up promotions without one.
-* **Warnings are returned, not yet collected.** They are a ready-made drift
-  signal; monitoring should record them over time.
-* **About 0.1-0.2 s per prediction**, mostly the forest spreading 200 trees
-  over every CPU core (`n_jobs: -1`) for a single engine. Fine for occasional
-  requests; tune if throughput ever matters.
+* **Accuracy against late-arriving truth (not built yet).** An engine's true
+  remaining life is known only once it fails; then every prediction made for it
+  can be graded. Measured on the diary, using NASA's truth file as the
+  "maintenance record": grading each engine's last cycle reproduces the offline
+  test RMSE (18.8) exactly; over the last 125 cycles of life -- where
+  maintenance decisions are made -- RMSE 19.8, bias +5.1 cycles (optimistic).
+  Grading every cycle against the uncapped truth (57.3) is misleading: the model
+  is capped at 125 by design. Lesson: the broken sensor barely moved accuracy
+  (19.8 -> 19.6, bias even "improved" to +2.0) -- accuracy alone would have
+  missed it; drift is the early warning, truth the late verdict.
+* **CPU and memory of the service (planned).** prometheus_client's process
+  collector, added to `ServiceMetrics`, would report the service's CPU (as
+  "cores in use", up to 12) and memory; two dashboard panels. It reads `/proc`,
+  so it reports nothing on Windows -- test that it is registered, not its values.
+  Every container's CPU (cAdvisor) needs access to Docker's internals.
+* **Grafana logs two harmless errors**: it looks for optional
+  `provisioning/plugins` and `provisioning/alerting` folders we do not use.
+  Adding them would keep the log clean, so real errors stand out.
+* **The drift check covers engine ages 1-100 only.** Older engines are watched
+  through their predictions and, eventually, the truth.
+* **The simulated fleet starts on the same day**, so a short time window of the
+  diary is also a narrow band of engine ages. Check whole runs, or simulate
+  engines entering service at different times.
+* **Nothing cleans up yet.** The diary grows by one line per prediction (about
+  18 MB for two full runs) and each drift report is about 4.6 MB.
+* **Metrics assume one service process.** With several uvicorn workers, each
+  would count separately; prometheus_client then needs its multiprocess mode.
+* **Warnings are now collected** (diary and Prometheus counter); a rise could
+  trigger a drift check automatically.
 * **Commit before training runs you want to reproduce.** Runs now record
   `git.uncommitted_changes`, and promotion warns about it, but a run trained from
   uncommitted code still cannot be rebuilt from its commit.

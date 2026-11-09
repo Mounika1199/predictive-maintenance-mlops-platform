@@ -81,6 +81,23 @@ class RulPredictor:
         return float(predict_rul(self.model, latest)[0])
 
 
+def use_one_core(model: Any) -> Any:
+    """Make the model predict on ONE processor core (if it has that setting).
+
+    Training uses every core (n_jobs: -1 in configs/training.yaml), and the
+    forest keeps that setting when it is saved. For training -- thousands of
+    rows, 200 trees to build -- splitting the work pays off. The service
+    predicts ONE row: asking a tree about one row takes microseconds, so
+    starting and coordinating 12 workers costs more than the work itself.
+    Measured: 70 ms per prediction on all cores, 36 ms on one -- same answers.
+
+    Changes only this loaded copy, never the registered model in MLflow.
+    """
+    if "n_jobs" in model.get_params():
+        model.set_params(n_jobs=1)
+    return model
+
+
 def load_champion(tracking_uri: str, registered_name: str) -> RulPredictor:
     """Fetch the current champion and its feature_stats.json from MLflow.
 
@@ -93,7 +110,7 @@ def load_champion(tracking_uri: str, registered_name: str) -> RulPredictor:
     version = client.get_model_version_by_alias(registered_name, CHAMPION)
 
     mlflow.set_tracking_uri(tracking_uri)
-    model = mlflow.sklearn.load_model(f"models:/{registered_name}/{version.version}")
+    model = use_one_core(mlflow.sklearn.load_model(f"models:/{registered_name}/{version.version}"))
     stats = mlflow.artifacts.load_dict(f"runs:/{version.run_id}/feature_stats.json")
 
     return RulPredictor(

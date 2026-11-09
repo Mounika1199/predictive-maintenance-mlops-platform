@@ -68,3 +68,27 @@ __pycache__/
 # ---------------------------------------------------------------------------
 mlflow.db
 mlruns/
+
+# ---------------------------------------------------------------------------
+# The prediction service's diary (configs/monitoring.yaml)
+#
+# Written by the running service, one file per day. Like data, it is an
+# OUTPUT, not source code, and it grows with every prediction.
+# ---------------------------------------------------------------------------
+/logs/
+
+# ---------------------------------------------------------------------------
+# Drift reports (scripts/check_drift.py)
+#
+# Generated HTML, about 4.6 MB each, rebuilt from the diary at any time.
+# ---------------------------------------------------------------------------
+/reports/
+
+# ---------------------------------------------------------------------------
+# Local secrets
+#
+# .env holds passwords (e.g. Grafana's admin password), which Docker Compose
+# reads automatically. This repository is PUBLIC: a committed password is
+# published, and stays in Git's history even after the file is deleted.
+# ---------------------------------------------------------------------------
+.env

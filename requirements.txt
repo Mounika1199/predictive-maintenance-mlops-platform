@@ -52,8 +52,20 @@ dvc==3.67.1
 fastapi==0.143.0
 uvicorn==0.54.0
 
+# Service health numbers for Prometheus: the service's /metrics page (request
+# counts, response times, ...). The official client; one package, no extras.
+prometheus-client==0.26.0
+
 # Testing the service. FastAPI's TestClient sends requests to the app inside
 # the test itself -- no running server, no network, no MLflow. It needs httpx2:
 # Starlette (which FastAPI is built on) tries httpx2 first, and its fallback to
 # the older httpx is deprecated and due to be removed.
 httpx2==2.16.0
+
+# Monitoring: drift reports. Evidently compares the readings the service saw
+# (its diary) with the training readings, sensor by sensor, and draws an HTML
+# report. Used by monitoring scripts on this machine only -- NOT in the service
+# image (requirements-serving.txt). 31 packages (plotly, statsmodels, ...);
+# changes none of the versions pinned above. It brings back httpx, which is
+# harmless: Starlette tries httpx2 first.
+evidently==0.7.23

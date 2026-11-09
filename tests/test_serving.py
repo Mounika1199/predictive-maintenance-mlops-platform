@@ -17,13 +17,16 @@ import numpy as np
 import pandas as pd
 import pytest
 from fastapi.testclient import TestClient
+from prometheus_client.parser import text_string_to_metric_families
 
 from src.data.load_cmapss import load_cmapss, load_config
 from src.features.labels import last_cycle_per_engine
 from src.models.training import build_model, predict_rul
+from src.monitoring.prediction_log import PredictionLog, read_prediction_log
 from src.serving.app import create_app
 from src.serving.checks import InvalidReadings, check_history
-from src.serving.predictor import RulPredictor
+from src.serving.predictor import RulPredictor, use_one_core
+from src.serving.schemas import MEASUREMENTS
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -52,10 +55,12 @@ def predictor(real) -> RulPredictor:
 
 
 @pytest.fixture(scope="module")
-def client(predictor):
+def client(predictor, tmp_path_factory):
     # `with` runs the service's startup (lifespan): it gets our predictor
-    # instead of contacting MLflow, and loads the validation contract.
-    with TestClient(create_app(predictor)) as test_client:
+    # instead of contacting MLflow, and loads the validation contract. Its
+    # diary goes to a temporary folder, never into the real logs/.
+    diary = PredictionLog(tmp_path_factory.mktemp("diary"))
+    with TestClient(create_app(predictor, diary)) as test_client:
         yield test_client
 
 
@@ -212,6 +217,166 @@ def test_a_change_the_model_cannot_see_is_still_flagged(client, raw_test) -> Non
 
     assert after["remaining_useful_life"] == before["remaining_useful_life"]
     assert any("sensor_1" in w for w in after["warnings"])
+
+
+# ---------------------------------------------------------------------------
+# The diary: what the service writes down for monitoring
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def diary(predictor, tmp_path):
+    """A fresh service with an empty diary of its own, so lines can be counted."""
+    with TestClient(create_app(predictor, PredictionLog(tmp_path))) as test_client:
+        yield test_client, tmp_path
+
+
+def test_a_prediction_writes_one_line_with_the_newest_reading_and_the_answer(diary, raw_test) -> None:
+    client, folder = diary
+    engine = readings_of(raw_test, 1)  # 31 cycles
+    answer = post(client, engine, engine_id="engine-1").json()
+
+    written = read_prediction_log(folder)
+    assert len(written) == 1  # one prediction, one line -- not 31
+    line, newest = written.iloc[0], engine.iloc[-1]
+    assert line["engine_id"] == "engine-1"
+    assert line["time_in_cycles"] == 31
+    assert line[MEASUREMENTS].tolist() == newest[MEASUREMENTS].tolist()  # exactly as sent
+    assert line["remaining_useful_life"] == answer["remaining_useful_life"]
+    assert line["model_name"] == "rul-fd001"
+    assert line["model_version"] == "test"
+    assert line["warnings"] == []
+
+
+def test_an_engine_reporting_after_every_flight_writes_each_cycle_once(diary, raw_test) -> None:
+    """A real engine would send its last 5 cycles after each flight: every
+    request repeats 4 cycles already sent, but the diary records each once."""
+    client, folder = diary
+    engine = readings_of(raw_test, 1)
+    for latest in range(5, 11):
+        post(client, engine.iloc[:latest].tail(5))
+
+    assert read_prediction_log(folder)["time_in_cycles"].tolist() == [5, 6, 7, 8, 9, 10]
+
+
+def test_a_refused_request_is_not_written(diary, raw_test) -> None:
+    client, folder = diary
+    assert post(client, readings_of(raw_test, 1).tail(3)).status_code == 422
+    assert read_prediction_log(folder).empty
+
+
+def test_warnings_are_written_too(diary, raw_test) -> None:
+    client, folder = diary
+    readings = readings_of(raw_test, 1).tail(5).copy()
+    readings.loc[readings.index[-1], "sensor_4"] = 1500.0
+
+    post(client, readings)
+
+    [warnings] = read_prediction_log(folder)["warnings"]
+    assert len(warnings) == 1 and "sensor_4" in warnings[0]
+
+
+def test_the_service_still_answers_when_the_diary_cannot_be_written(predictor, raw_test, tmp_path, caplog) -> None:
+    """Monitoring must never take predictions down with it."""
+    blocked = tmp_path / "a-file-not-a-folder"
+    blocked.write_text("x", encoding="utf-8")
+
+    with TestClient(create_app(predictor, PredictionLog(blocked))) as client:
+        response = post(client, readings_of(raw_test, 1))
+
+    assert response.status_code == 200
+    assert "NOT written to the diary" in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# /metrics: the numbers Prometheus collects
+# ---------------------------------------------------------------------------
+
+
+def metric(client, name: str, **labels) -> float:
+    """One number from the /metrics page, exactly as Prometheus would read it."""
+    for family in text_string_to_metric_families(client.get("/metrics").text):
+        for sample in family.samples:
+            if sample.name == name and all(sample.labels.get(k) == v for k, v in labels.items()):
+                return sample.value
+    return 0.0
+
+
+def test_requests_are_counted_by_route_and_status(diary, raw_test) -> None:
+    client, _ = diary
+    post(client, readings_of(raw_test, 1))             # answered
+    post(client, readings_of(raw_test, 1).tail(3))     # refused: too little history
+
+    assert metric(client, "rul_http_requests_total", route="/predict", status="200") == 1
+    assert metric(client, "rul_http_requests_total", route="/predict", status="422") == 1
+
+
+def test_every_request_is_timed(diary, raw_test) -> None:
+    client, _ = diary
+    post(client, readings_of(raw_test, 1))
+
+    assert metric(client, "rul_http_request_duration_seconds_count", route="/predict") == 1
+    assert metric(client, "rul_http_request_duration_seconds_sum", route="/predict") > 0
+
+
+def test_unknown_addresses_share_one_label(diary) -> None:
+    """A thousand random URLs must not become a thousand counters."""
+    client, _ = diary
+    for address in ["/admin", "/wp-login.php", "/predict/../../etc"]:
+        assert client.get(address).status_code == 404
+
+    assert metric(client, "rul_http_requests_total", route="unmatched", status="404") == 3
+    assert "wp-login" not in client.get("/metrics").text
+
+
+def test_predictions_with_warnings_are_counted(diary, raw_test) -> None:
+    client, _ = diary
+    readings = readings_of(raw_test, 1).tail(5).copy()
+    post(client, readings)                                      # normal
+    readings.loc[readings.index[-1], "sensor_4"] = 1500.0
+    post(client, readings)                                      # outside the training range
+
+    assert metric(client, "rul_predictions_with_warnings_total") == 1
+
+
+def test_diary_failures_are_counted(predictor, raw_test, tmp_path) -> None:
+    """Monitoring the monitoring: a diary that stops saving shows up on a graph."""
+    blocked = tmp_path / "a-file-not-a-folder"
+    blocked.write_text("x", encoding="utf-8")
+
+    with TestClient(create_app(predictor, PredictionLog(blocked))) as client:
+        post(client, readings_of(raw_test, 1))
+        assert metric(client, "rul_prediction_log_failures_total") == 1
+
+
+def test_the_metrics_name_the_model_answering(diary) -> None:
+    client, _ = diary
+    assert metric(client, "rul_model_info", model_name="rul-fd001", model_version="test") == 1
+
+
+# ---------------------------------------------------------------------------
+# Speed: one processor core for single predictions
+# ---------------------------------------------------------------------------
+
+
+def test_one_core_gives_the_same_answers(real) -> None:
+    """Trained on every core, like the champion; served on one. The core count
+    changes how the work is split, not what is computed -- only rounding dust
+    from adding the trees' answers in a different order."""
+    train, test = real["scaled"]["train"], real["scaled"]["test"]
+    model = build_model("random_forest", {"n_estimators": 30, "min_samples_leaf": 5, "n_jobs": -1})
+    model.fit(train[real["columns"]], train["rul"])
+    on_all_cores = model.predict(test[real["columns"]])
+
+    served = use_one_core(model)
+
+    assert served.get_params()["n_jobs"] == 1
+    np.testing.assert_allclose(served.predict(test[real["columns"]]), on_all_cores, rtol=0, atol=1e-9)
+
+
+def test_a_model_without_the_setting_is_left_alone() -> None:
+    baseline = build_model("baseline", {})
+    assert use_one_core(baseline) is baseline
 
 
 # ---------------------------------------------------------------------------

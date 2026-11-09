@@ -1,0 +1,20 @@
+# ---------------------------------------------------------------------------
+# Prometheus settings (used by the prometheus container in compose.yaml).
+#
+# Prometheus PULLS: every scrape_interval it visits each target's /metrics
+# page, reads the numbers, and stores each one with the time.
+# Its web page: http://127.0.0.1:9090
+# ---------------------------------------------------------------------------
+
+global:
+  # Every 5 seconds. Short, so graphs react quickly while we watch them; the
+  # numbers are tiny, so storage is no concern.
+  scrape_interval: 5s
+
+scrape_configs:
+  # Our prediction service, found by its compose service name -- like the
+  # service finds MLflow at http://mlflow:5000. Prometheus reads
+  # http://rul-service:8000/metrics (/metrics is the default path).
+  - job_name: rul-service
+    static_configs:
+      - targets: ["rul-service:8000"]

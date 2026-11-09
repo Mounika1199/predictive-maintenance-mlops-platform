@@ -1,0 +1,27 @@
+# ---------------------------------------------------------------------------
+# Grafana data source: where the dashboards get their numbers.
+#
+# Grafana reads this file at start-up ("provisioning"), so the data source is
+# set up from Git, identically on every computer -- nobody clicks it together.
+# ---------------------------------------------------------------------------
+
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    # A fixed ID: the dashboard JSON refers to its data source by this uid.
+    uid: prometheus
+    type: prometheus
+    # Grafana and Prometheus are both containers on the compose network, so
+    # Prometheus is found by its service NAME (like the service finds MLflow).
+    url: http://prometheus:9090
+    # Grafana itself asks Prometheus; the browser never does (it could not
+    # reach "prometheus:9090" anyway -- that name exists only inside Docker).
+    access: proxy
+    isDefault: true
+    # Not editable in the web page: this file is the only source of truth.
+    editable: false
+    jsonData:
+      # Prometheus collects every 5 s (monitoring/prometheus/prometheus.yml);
+      # Grafana never asks for finer detail than that.
+      timeInterval: 5s
